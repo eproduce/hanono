@@ -3,20 +3,25 @@ name: Build & Release
 on:
   push:
     branches: [main]
+    tags:
+      - 'v*'
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  # ── 第一步：release-please 自动版本管理 ──
+  # ── release-please：自动版本管理（仅 main 分支 push/PR 时运行）──
   release-please:
+    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -25,10 +30,16 @@ jobs:
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json
 
-  # ── 第二步：全平台构建（仅 release-please 创建新版本时触发）──
+  # ── 全平台构建（tag 推送 或 workflow_dispatch 或 release-please 创建 release 时触发）──
   build:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: |
+      always() &&
+      (
+        startsWith(github.ref, 'refs/tags/v') ||
+        github.event_name == 'workflow_dispatch' ||
+        (needs.release-please.result == 'success' && needs.release-please.outputs.release_created == 'true')
+      )
     strategy:
       fail-fast: false
       matrix:
@@ -86,9 +97,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ needs.release-please.outputs.tag_name }}
-          releaseName: 'Hanono v__VERSION__'
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Hanono ${{ github.ref_name }}'
           releaseBody: 'See [CHANGELOG.md](./CHANGELOG.md) for details.'
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
+
