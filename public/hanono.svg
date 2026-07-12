@@ -28,7 +28,7 @@
   </defs>
 
   <!-- 背景 — 方形，让 macOS 自己处理圆角 -->
-  <rect x="0" y="0" width="1024" height="1024" fill="url(#bgGrad)"/>
+  <rect x="0" y="0" width="1024" height="1024" rx="204" fill="url(#bgGrad)"/>
 
   <!-- 光晕背景 -->
   <rect x="0" y="0" width="1024" height="1024" fill="url(#glowGrad)"/>
