@@ -93,14 +93,25 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        uses: tauri-apps/tauri-action@v0
+        shell: bash
+        run: npx tauri build ${{ matrix.args }}
+
+      - name: Upload binaries to release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Hanono ${{ github.ref_name }}'
-          releaseBody: 'See [CHANGELOG.md](./CHANGELOG.md) for details.'
-          releaseDraft: false
+          tag_name: ${{ github.ref_name }}
+          name: 'Hanono ${{ github.ref_name }}'
+          body: 'See [CHANGELOG.md](./CHANGELOG.md) for details.'
+          draft: false
           prerelease: false
-          args: ${{ matrix.args }}
+          files: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.dmg
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/msi/*.exe
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/appimage/*.AppImage
 
