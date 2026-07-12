@@ -1,6 +1,6 @@
 [package]
 name = "hanono"
-version = "0.1.0"
+version = "0.3.2"
 description = "A Tauri Music Player"
 authors = ["you"]
 edition = "2021"
