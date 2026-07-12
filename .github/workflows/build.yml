@@ -102,25 +102,21 @@ jobs:
           echo "=== Built files ==="
           find src-tauri/target/release/bundle -type f 2>/dev/null || echo "No bundle dir"
 
-      - name: Upload binaries to release
-        uses: softprops/action-gh-release@v2
+      - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: 'Hanono ${{ github.ref_name }}'
-          body: 'See [CHANGELOG.md](./CHANGELOG.md) for details.'
-          draft: false
-          prerelease: false
-          make_latest: true
-          fail_on_unmatched_files: false
-          files: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/*.dmg
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/msi/*.exe
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/appimage/*.AppImage
-            src-tauri/target/release/bundle/rpm/*.rpm
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Create release if not exists (idempotent)
+          gh release create "${{ github.ref_name }}" \
+            --title "Hanono ${{ github.ref_name }}" \
+            --notes "See [CHANGELOG.md](./CHANGELOG.md) for details." \
+            --draft=false --prerelease=false \
+            2>/dev/null || true
+          # Upload all bundle files
+          find src-tauri/target/release/bundle -type f | while read f; do
+            echo "Uploading: $f"
+            gh release upload "${{ github.ref_name }}" "$f" --clobber
+          done
 
