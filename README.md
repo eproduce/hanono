@@ -6,7 +6,7 @@
 
 Built with Tauri 2 + Vue 3 + Rust · Web Audio API 音效增强
 
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-0.4.0-blue)](https://github.com/eproduce/hanono/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey)](https://github.com/eproduce/hanono/releases)
 
 </div>
