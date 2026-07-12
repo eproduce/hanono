@@ -114,8 +114,10 @@ jobs:
             --notes "See [CHANGELOG.md](./CHANGELOG.md) for details." \
             --draft=false --prerelease=false \
             2>/dev/null || true
-          # Upload all bundle files
-          find src-tauri/target/release/bundle -type f | while read f; do
+          # Upload only the top-level bundle files (dmg/deb/rpm/AppImage/msi/exe)
+          find src-tauri/target/release/bundle -maxdepth 2 -type f \
+            \( -name "*.dmg" -o -name "*.deb" -o -name "*.rpm" -o -name "*.AppImage" -o -name "*.msi" -o -name "*.exe" \) \
+            | while read f; do
             echo "Uploading: $f"
             gh release upload "${{ github.ref_name }}" "$f" --clobber
           done
