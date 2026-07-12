@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <!-- 背景渐变 -->
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#141428"/>
+      <stop offset="100%" stop-color="#0f0f1a"/>
+    </linearGradient>
+    <!-- 品牌紫色渐变 -->
+    <linearGradient id="brandGrad" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="50%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <!-- 光晕渐变 -->
+    <radialGradient id="glowGrad" cx="0.5" cy="0.45" r="0.5">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.35"/>
+      <stop offset="50%" stop-color="#8b5cf6" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#0f0f1a" stop-opacity="0"/>
+    </radialGradient>
+    <!-- 光晕滤镜 -->
+    <filter id="barGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景 — 方形，让 macOS 自己处理圆角 -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#bgGrad)"/>
+
+  <!-- 光晕背景 -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#glowGrad)"/>
+
+  <!-- 
+    Equilizer H 设计 
+    5 根均衡器柱，中间三根构成 "H" 形
+    柱 2, 4 最高 → H 的两竖
+    柱 3 较矮 → H 的横杠
+    柱 1, 5 最短 → 均衡器外侧
+  -->
+  <g filter="url(#barGlow)">
+    <rect x="220" y="460" width="80" height="240" rx="40" fill="url(#brandGrad)" opacity="0.65"/>
+    <rect x="330" y="180" width="100" height="720" rx="50" fill="url(#brandGrad)"/>
+    <rect x="460" y="260" width="116" height="160" rx="58" fill="url(#brandGrad)"/>
+    <rect x="600" y="180" width="100" height="720" rx="50" fill="url(#brandGrad)"/>
+    <rect x="730" y="460" width="80" height="240" rx="40" fill="url(#brandGrad)" opacity="0.65"/>
+  </g>
+
+  <!-- 顶部装饰圆点 -->
+  <circle cx="300" cy="150" r="18" fill="#a78bfa" opacity="0.5"/>
+  <circle cx="512" cy="120" r="24" fill="#8b5cf6" opacity="0.6"/>
+  <circle cx="724" cy="150" r="18" fill="#a78bfa" opacity="0.5"/>
+
+  <!-- 底部波形线 -->
+  <g opacity="0.12" stroke="#a78bfa" stroke-width="6" stroke-linecap="round" fill="none">
+    <path d="M270 920 Q320 860 340 890 Q360 920 380 890 Q400 860 420 890 Q440 920 460 890 Q480 860 500 890 Q520 920 540 890 Q560 860 580 890 Q600 920 620 890 Q640 860 660 890 Q680 920 700 890 Q720 860 754 890"/>
+  </g>
+</svg>

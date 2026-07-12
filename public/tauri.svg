@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <!-- 背景渐变 -->
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#141428"/>
+      <stop offset="100%" stop-color="#0f0f1a"/>
+    </linearGradient>
+    <!-- 品牌紫色渐变 -->
+    <linearGradient id="brandGrad" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="50%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+    <!-- 光晕渐变 -->
+    <radialGradient id="glowGrad" cx="0.5" cy="0.45" r="0.5">
+      <stop offset="0%" stop-color="#6366f1" stop-opacity="0.35"/>
+      <stop offset="50%" stop-color="#8b5cf6" stop-opacity="0.10"/>
+      <stop offset="100%" stop-color="#0f0f1a" stop-opacity="0"/>
+    </radialGradient>
+    <!-- 圆角裁剪 -->
+    <clipPath id="roundedClip">
+      <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224"/>
+    </clipPath>
+    <!-- 光晕滤镜 -->
+    <filter id="barGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- 背景 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="224" ry="224" fill="url(#bgGrad)"/>
+
+  <!-- 细微边框 -->
+  <rect x="2" y="2" width="1020" height="1020" rx="222" ry="222" fill="none" stroke="#ffffff" stroke-opacity="0.06" stroke-width="4"/>
+
+  <!-- 光晕背景 -->
+  <rect x="0" y="0" width="1024" height="1024" fill="url(#glowGrad)"/>
+
+  <!-- 
+    Equilizer H 设计 
+    5 根均衡器柱，中间三根构成 "H" 形
+    柱 2, 4 最高 → H 的两竖
+    柱 3 较矮 → H 的横杠
+    柱 1, 5 最短 → 均衡器外侧
+  -->
+  <g filter="url(#barGlow)">
+    <!-- Bar 1: 左外侧，最矮 -->
+    <rect x="266" y="528" width="64" height="176" rx="32" fill="url(#brandGrad)" opacity="0.65"/>
+    
+    <!-- Bar 2: 左竖 (H) -->
+    <rect x="362" y="352" width="72" height="480" rx="36" fill="url(#brandGrad)"/>
+    
+    <!-- Bar 3: 横杠 (H)，悬浮于上方作为 crossbar -->
+    <rect x="466" y="384" width="92" height="96" rx="46" fill="url(#brandGrad)"/>
+    
+    <!-- Bar 4: 右竖 (H) -->
+    <rect x="590" y="352" width="72" height="480" rx="36" fill="url(#brandGrad)"/>
+    
+    <!-- Bar 5: 右外侧，最矮 -->
+    <rect x="694" y="528" width="64" height="176" rx="32" fill="url(#brandGrad)" opacity="0.65"/>
+  </g>
+
+  <!-- 顶部装饰圆点 — 三颗星 -->
+  <circle cx="330" cy="280" r="14" fill="#a78bfa" opacity="0.5"/>
+  <circle cx="512" cy="260" r="18" fill="#8b5cf6" opacity="0.6"/>
+  <circle cx="694" cy="280" r="14" fill="#a78bfa" opacity="0.5"/>
+
+  <!-- 底部波形线条装饰 -->
+  <g opacity="0.15" stroke="#a78bfa" stroke-width="6" stroke-linecap="round" fill="none">
+    <path d="M300 780 Q340 720 360 750 Q380 780 400 750 Q420 720 440 750 Q460 780 480 750 Q500 720 520 750 Q540 780 560 750 Q580 720 600 750 Q620 780 640 750 Q660 720 680 750 Q700 780 724 750"/>
+  </g>
+</svg>
