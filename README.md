@@ -37,7 +37,22 @@ Built with Tauri 2 + Vue 3 + Rust · Web Audio API 音效增强
 | Linux x64 | `.deb` | Ubuntu 24.04+ / Debian 12+ |
 | Linux x64 | `.rpm` | Fedora 39+ |
 
-> ⚠️ **Linux 注意**：`.deb` / `.rpm` 需要 `libwebkit2gtk-4.1`，仅限较新发行版。老系统请用 **AppImage**。 |
+> ⚠️ **Linux 注意**：`.deb` / `.rpm` 需要 `libwebkit2gtk-4.1`，仅限较新发行版。老系统 / 麒麟 V10 / 离线环境请用 **AppImage**。
+
+### 🔒 离线 / 内网 / 无 FUSE 环境部署（麒麟 V10 等）
+
+```bash
+# 1. 将 AppImage 复制到目标机器（U盘/内网传输）
+# 2. 赋予执行权限
+chmod +x Hanono_0.4.0_amd64.AppImage
+
+# 3. 解压运行（无需 root，无需 FUSE，无需联网）
+./Hanono_0.4.0_amd64.AppImage --appimage-extract
+./squashfs-root/AppRun
+
+# 或使用一键脚本
+bash scripts/run-hanono.sh ./Hanono_0.4.0_amd64.AppImage
+``` |
 
 ## 🛠️ 开发
 
