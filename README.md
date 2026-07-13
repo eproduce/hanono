@@ -33,6 +33,7 @@ Built with Tauri 2 + Vue 3 + Rust · Web Audio API 音效增强
 | macOS Intel | `.dmg` | macOS 13+ |
 | macOS Apple Silicon | `.dmg` | macOS 13+ |
 | Windows x64 | `.msi` / `.exe` | Windows 10+ |
+| Windows x64 | `.zip` (绿色便携版) | 免安装，解压即用 |
 | Linux x64 | `.AppImage` | **推荐**，自带依赖，适用所有发行版 |
 | Linux x64 | `.deb` | Ubuntu 24.04+ / Debian 12+ |
 | Linux x64 | `.rpm` | Fedora 39+ |

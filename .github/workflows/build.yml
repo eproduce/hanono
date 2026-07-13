@@ -104,6 +104,20 @@ jobs:
           echo "=== Built files in $BUNDLE_DIR ==="
           find "$BUNDLE_DIR" -maxdepth 2 -type f 2>/dev/null || echo "No bundle dir"
 
+      - name: Package Windows portable (zip)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          REL_DIR="src-tauri/target/${{ matrix.target }}/release"
+          [ -d "$REL_DIR" ] || REL_DIR="src-tauri/target/release"
+          PORTABLE_DIR="hanono-portable"
+          mkdir -p "$PORTABLE_DIR"
+          # Copy the exe and webview2 loader (if bundled)
+          cp "$REL_DIR/hanono.exe" "$PORTABLE_DIR/" 2>/dev/null || true
+          cp "$REL_DIR/"*.dll "$PORTABLE_DIR/" 2>/dev/null || true
+          # Create zip
+          zip -r "src-tauri/target/release/bundle/Hanono_${{ github.ref_name }}_x64_portable.zip" "$PORTABLE_DIR"
+
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
