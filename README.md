@@ -28,12 +28,16 @@ Built with Tauri 2 + Vue 3 + Rust · Web Audio API 音效增强
 
 前往 [Releases](https://github.com/eproduce/hanono/releases) 下载最新版本：
 
-| 平台 | 格式 |
-|------|------|
-| macOS Intel | `.dmg` |
-| macOS Apple Silicon | `.dmg` |
-| Windows x64 | `.msi` / `.exe` |
-| Linux x64 | `.AppImage` / `.deb` |
+| 平台 | 格式 | 说明 |
+|------|------|------|
+| macOS Intel | `.dmg` | macOS 13+ |
+| macOS Apple Silicon | `.dmg` | macOS 13+ |
+| Windows x64 | `.msi` / `.exe` | Windows 10+ |
+| Linux x64 | `.AppImage` | **推荐**，自带依赖，适用所有发行版 |
+| Linux x64 | `.deb` | Ubuntu 24.04+ / Debian 12+ |
+| Linux x64 | `.rpm` | Fedora 39+ |
+
+> ⚠️ **Linux 注意**：`.deb` / `.rpm` 需要 `libwebkit2gtk-4.1`，仅限较新发行版。老系统请用 **AppImage**。 |
 
 ## 🛠️ 开发
 
