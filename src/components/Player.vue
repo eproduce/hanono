@@ -4,6 +4,14 @@ import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
+import WaveformCanvas from './WaveformCanvas.vue';
+import FxPanel from './FxPanel.vue';
+import PlaylistSidebar from './PlaylistSidebar.vue';
+import AppModals from './AppModals.vue';
+import ConvertDialog from './ConvertDialog.vue';
+import TrimDialog from './TrimDialog.vue';
+import { useAudioEngine } from '../composables/useAudioEngine';
+import type { EqPresetKey } from '../composables/useAudioEngine';
 
 interface Track {
   name: string;
@@ -14,218 +22,14 @@ interface Track {
 
 const audio = new Audio();
 
-// ========== 音效系统 (Web Audio API) ==========
-let audioCtx: AudioContext | null = null;
-let sourceNode: MediaElementAudioSourceNode | null = null;
-
-
-// 效果节点
-let bassBoostNode: BiquadFilterNode | null = null;    // 低音增强 (lowshelf)
-let eqNodes: BiquadFilterNode[] = [];                  // 5段均衡器 (peaking)
-let surroundNode: StereoPannerNode | null = null;      // 3D环绕
-let reverbNode: ConvolverNode | null = null;           // 混响
-let wetGainNode: GainNode | null = null;               // 混响湿信号
-let dryGainNode: GainNode | null = null;               // 干信号
-let masterGain: GainNode | null = null;                // 主输出增益
-
-// 音效参数
-const eqBands = [
-  { name: '60Hz',  freq: 60,   gain: ref(0),  q: 0.8 },
-  { name: '250Hz', freq: 250,  gain: ref(0),  q: 0.8 },
-  { name: '1kHz',  freq: 1000, gain: ref(0),  q: 0.8 },
-  { name: '4kHz',  freq: 4000, gain: ref(0),  q: 0.8 },
-  { name: '8kHz',  freq: 8000, gain: ref(0),  q: 0.8 },
-];
-const bassBoost = ref(0);      // 0-12 dB
-const surroundAmount = ref(0); // 0-1
-const reverbAmount = ref(0);   // 0-1
-
-// EQ 预设
-type EqPresetKey = 'flat' | 'pop' | 'rock' | 'jazz' | 'classical' | 'vocal' | 'bass';
-const eqPresets: Record<EqPresetKey, number[]> = {
-  flat:      [ 0,  0,  0,  0,  0],
-  pop:       [-1,  2,  3,  2,  1],
-  rock:      [ 3,  0, -2,  1,  2],
-  jazz:      [ 2,  1,  0, -1,  0],
-  classical: [ 1,  0,  0,  1,  2],
-  vocal:     [-2, -1,  3,  2,  1],
-  bass:      [ 8,  4,  0, -1, -2],
-};
-const currentPreset = ref<EqPresetKey>('flat');
-const presetLabels: Record<EqPresetKey, string> = {
-  flat: '默认', pop: '流行', rock: '摇滚', jazz: '爵士',
-  classical: '古典', vocal: '人声', bass: '低音',
-};
-
-const currentFxLabel = computed(() => {
-  const effectsOn = bassBoost.value > 0 || surroundAmount.value > 0 || reverbAmount.value > 0;
-  if (currentPreset.value !== 'flat') return presetLabels[currentPreset.value];
-  if (effectsOn) return '自定义';
-  return '';
-});
-
-function applyPreset(key: EqPresetKey) {
-  currentPreset.value = key;
-  const gains = eqPresets[key];
-  eqBands.forEach((band, i) => { band.gain.value = gains[i]; });
-  if (ensureFxReady()) {
-    eqBands.forEach((band, i) => {
-      eqNodes[i].gain.setTargetAtTime(band.gain.value, audioCtx!.currentTime, 0.02);
-    });
-  }
-  if (key === 'bass') {
-    bassBoost.value = 6;
-    if (ensureFxReady()) bassBoostNode!.gain.setTargetAtTime(6, audioCtx!.currentTime, 0.02);
-  } else if (bassBoost.value === 6) {
-    bassBoost.value = 0;
-    if (ensureFxReady()) bassBoostNode!.gain.setTargetAtTime(0, audioCtx!.currentTime, 0.02);
-  }
-}
-
-function initAudioContext() {
-  if (audioCtx) return;
-  audioCtx = new AudioContext();
-  sourceNode = audioCtx.createMediaElementSource(audio);
-
-  // 低音增强 (lowshelf)
-  bassBoostNode = audioCtx!.createBiquadFilter();
-  bassBoostNode.type = 'lowshelf';
-  bassBoostNode.frequency.value = 80;
-  bassBoostNode.gain.value = bassBoost.value;
-
-  // 5段均衡器 (peaking)
-  eqNodes = eqBands.map(band => {
-    const filter = audioCtx!.createBiquadFilter();
-    filter.type = 'peaking';
-    filter.frequency.value = band.freq;
-    filter.Q.value = band.q;
-    filter.gain.value = band.gain.value;
-    return filter;
-  });
-
-  // 3D环绕 (StereoPanner)
-  surroundNode = audioCtx.createStereoPanner();
-  surroundNode.pan.value = 0;
-
-  // 混响 (简单脉冲响应)
-  reverbNode = audioCtx.createConvolver();
-  reverbNode.buffer = createReverbBuffer(audioCtx);
-
-  wetGainNode = audioCtx.createGain();
-  wetGainNode.gain.value = 0;
-
-  dryGainNode = audioCtx.createGain();
-  dryGainNode.gain.value = 1;
-
-  masterGain = audioCtx.createGain();
-  masterGain.gain.value = 1;
-
-  // 信号链: source → bassBoost → EQ1..EQ5 → surround → (dry + reverb→wet) → masterGain → destination
-  let prev: AudioNode = sourceNode;
-  prev.connect(bassBoostNode!);
-  prev = bassBoostNode!;
-  for (const eq of eqNodes) {
-    prev.connect(eq);
-    prev = eq;
-  }
-  prev.connect(surroundNode!);
-  prev = surroundNode!;
-
-  // 干/湿分支
-  prev.connect(dryGainNode!);
-  prev.connect(reverbNode!);
-  reverbNode!.connect(wetGainNode!);
-
-  dryGainNode!.connect(masterGain!);
-  wetGainNode!.connect(masterGain!);
-  masterGain!.connect(audioCtx.destination);
-}
-
-function createReverbBuffer(ctx: AudioContext): AudioBuffer {
-  const sampleRate = ctx.sampleRate;
-  const length = sampleRate * 1.5; // 1.5秒脉冲响应
-  const buffer = ctx.createBuffer(2, length, sampleRate);
-  for (let ch = 0; ch < 2; ch++) {
-    const data = buffer.getChannelData(ch);
-    for (let i = 0; i < length; i++) {
-      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (sampleRate * 0.3));
-    }
-  }
-  return buffer;
-}
-
-function ensureFxReady(): boolean {
-  if (!audioCtx) initAudioContext();
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-  return audioCtx !== null && eqNodes.length === 5;
-}
-
-// 安全的滑块处理函数（避免内联类型转换崩溃）
-function onBassBoostInput(e: Event) {
-  bassBoost.value = parseFloat((e.target as HTMLInputElement).value);
-  updateBassBoost();
-}
-function onSurroundInput(e: Event) {
-  surroundAmount.value = parseFloat((e.target as HTMLInputElement).value);
-  updateSurround();
-}
-function onReverbInput(e: Event) {
-  reverbAmount.value = parseFloat((e.target as HTMLInputElement).value);
-  updateReverb();
-}
-function onEqBandInput(index: number, e: Event) {
-  eqBands[index].gain.value = parseFloat((e.target as HTMLInputElement).value);
-  updateEqBand(index);
-}
-
-function updateBassBoost() {
-  if (!ensureFxReady()) return;
-  bassBoostNode!.gain.setTargetAtTime(bassBoost.value, audioCtx!.currentTime, 0.02);
-}
-
-function updateEqBand(index: number) {
-  if (!ensureFxReady()) return;
-  eqNodes[index].gain.setTargetAtTime(eqBands[index].gain.value, audioCtx!.currentTime, 0.02);
-  currentPreset.value = 'flat';
-}
-
-function updateSurround() {
-  if (!ensureFxReady()) return;
-  surroundNode!.pan.setTargetAtTime(surroundAmount.value * 0.8, audioCtx!.currentTime, 0.02);
-}
-
-function updateReverb() {
-  if (!ensureFxReady()) return;
-  wetGainNode!.gain.setTargetAtTime(reverbAmount.value * 0.5, audioCtx!.currentTime, 0.02);
-  dryGainNode!.gain.setTargetAtTime(1 - reverbAmount.value * 0.3, audioCtx!.currentTime, 0.02);
-}
-
-function resetAllEffects() {
-  bassBoost.value = 0;
-  surroundAmount.value = 0;
-  reverbAmount.value = 0;
-  applyPreset('flat');
-  if (!ensureFxReady()) return;
-  bassBoostNode!.gain.setTargetAtTime(0, audioCtx!.currentTime, 0.02);
-  surroundNode!.pan.setTargetAtTime(0, audioCtx!.currentTime, 0.02);
-  wetGainNode!.gain.setTargetAtTime(0, audioCtx!.currentTime, 0.02);
-  dryGainNode!.gain.setTargetAtTime(1, audioCtx!.currentTime, 0.02);
-}
-
-const showFxPanel = ref(false);
-
-function openFxPanel() {
-  ensureFxReady();
-  showFxPanel.value = true;
-}
-
-// 🔑 用户首次交互时初始化 AudioContext（浏览器策略要求）
-function ensureAudioContext() {
-  if (!audioCtx) initAudioContext();
-  if (audioCtx?.state === 'suspended') audioCtx.resume();
-}
-
-// ========== 音效系统结束 ==========
+// ========== 音效系统 (composable) ==========
+const {
+  eqBands, bassBoost, surroundAmount, reverbAmount,
+  currentPreset, currentFxLabel, showFxPanel, eqPresets,
+  ensureAudioContext, applyPreset,
+  onBassBoostInput, onSurroundInput, onReverbInput, onEqBandInput,
+  resetAllEffects, setMasterVolume, openFxPanel,
+} = useAudioEngine(audio);
 const playlist = ref<Track[]>([]);
 const favorites = ref<Track[]>([]);
 
@@ -252,7 +56,8 @@ const volume = ref(1);
 function setVolume(v: number) {
   volume.value = v;
   audio.volume = v;
-  if (masterGain) masterGain.gain.setTargetAtTime(v, audioCtx!.currentTime, 0.02);
+  const loudGain = (audioInfo.value as any)?._loudnessGain ?? 1.0;
+  setMasterVolume(v * loudGain);
   if (v > 0) localStorage.setItem('hanono_prev_volume', String(v));
 }
 
@@ -263,12 +68,13 @@ function onVolumeInput(e: Event) {
 function toggleMute() {
   if (volume.value > 0) {
     audio.volume = 0;
-    if (masterGain) masterGain.gain.setTargetAtTime(0, audioCtx!.currentTime, 0.02);
+    setMasterVolume(0);
     volume.value = 0;
   } else {
     const prev = parseFloat(localStorage.getItem('hanono_prev_volume') || '0.7');
     audio.volume = prev;
-    if (masterGain) masterGain.gain.setTargetAtTime(prev, audioCtx!.currentTime, 0.02);
+    const loudGain = (audioInfo.value as any)?._loudnessGain ?? 1.0;
+    setMasterVolume(prev * loudGain);
     volume.value = prev;
   }
 }
@@ -285,6 +91,15 @@ const contextMenu = ref({ visible: false, x: 0, y: 0, trackIndex: -1 });
 const showShortcuts = ref(false);
 // 显示关于面板
 const showAbout = ref(false);
+// 格式转换
+const showConvertDialog = ref(false);
+const convertingTrackName = ref('');
+const convertingTrackPath = ref('');
+
+// 裁剪
+const showTrimDialog = ref(false);
+const trimTrackName = ref('');
+const trimTrackPath = ref('');
 
 // 封面动效模式: 'none' | 'rotate' | 'pulse' | 'glow'
 const coverEffect = ref<'none' | 'rotate' | 'pulse' | 'glow'>('glow');
@@ -341,6 +156,29 @@ interface LyricLine { time: number; text: string; }
 const lyrics = ref<LyricLine[]>([]);
 const currentLyricIdx = ref(-1);
 
+// 波形数据
+const waveformPeaks = ref<number[]>([]);
+const waveformLoading = ref(false);
+let waveformAbortId = 0;
+
+// 音频详情
+interface AudioInfo {
+  codec: string;
+  sampleRate: number;
+  sampleRateStr: string;
+  channels: number;
+  channelsStr: string;
+  bitDepth: number;
+  bitDepthStr: string;
+  bitrate: number;
+  bitrateStr: string;
+  durationSecs: number;
+  durationStr: string;
+  fileSize: number;
+  fileSizeStr: string;
+}
+const audioInfo = ref<AudioInfo | null>(null);
+
 function parseLrc(lrcText: string): LyricLine[] {
   const lines: LyricLine[] = [];
   const regex = /\[(\d{2}):(\d{2}(?:\.\d{2,3})?)\](.*)/;
@@ -377,6 +215,64 @@ function updateLyricIndex() {
     }
   }
   currentLyricIdx.value = -1;
+}
+
+// 波形生成
+async function loadWaveform(track: Track) {
+  waveformPeaks.value = [];
+  if (!track.path || !isTauri()) return;
+
+  const currentAbortId = ++waveformAbortId;
+  waveformLoading.value = true;
+
+  try {
+    const result = await invoke<{ peaks: number[]; durationSecs: number }>('generate_waveform', {
+      path: track.path,
+      numPeaks: 1500,
+    });
+    if (currentAbortId === waveformAbortId) {
+      waveformPeaks.value = result.peaks;
+    }
+  } catch (e) {
+    console.warn('[waveform] generation failed:', e);
+    if (currentAbortId === waveformAbortId) {
+      waveformPeaks.value = [];
+    }
+  } finally {
+    if (currentAbortId === waveformAbortId) {
+      waveformLoading.value = false;
+    }
+  }
+}
+
+function onWaveformSeek(time: number) {
+  audio.currentTime = time;
+}
+
+// 音频详情
+async function loadAudioInfo(track: Track) {
+  audioInfo.value = null;
+  if (!track.path || !isTauri()) return;
+
+  try {
+    const result = await invoke<AudioInfo>('get_audio_info', { path: track.path });
+    audioInfo.value = result;
+  } catch (e) {
+    console.warn('[audio-info] failed:', e);
+  }
+
+  // Also analyze loudness (fire-and-forget style)
+  try {
+    const loud = await invoke<{ offsetNum: number; integrated: string }>('analyze_loudness', { path: track.path });
+    if (audioInfo.value && loud.offsetNum !== 0) {
+      // Apply gain offset to master volume (clamp to reasonable range)
+      const gainDb = Math.max(-10, Math.min(10, loud.offsetNum));
+      const gainLinear = Math.pow(10, gainDb / 20);
+      (audioInfo.value as any)._loudnessGain = gainLinear;
+    }
+  } catch (e) {
+    console.warn('[loudness] analysis failed:', e);
+  }
 }
 
 function toggleSleepTimer() {
@@ -494,6 +390,8 @@ function loadCurrent() {
   audio.playbackRate = playbackRate.value;
   audio.load();
   loadLyrics(item);
+  loadWaveform(item);
+  loadAudioInfo(item);
   setupMediaSession(item);
 }
 
@@ -780,14 +678,68 @@ function onContextMenuAction(action: string) {
     case 'favor':
       toggleFavor(idx);
       break;
+    case 'convert':
+      convertingTrackName.value = playlist.value[idx].name;
+      convertingTrackPath.value = playlist.value[idx].path || '';
+      showConvertDialog.value = true;
+      closeContextMenu();
+      return;
+    case 'trim':
+      trimTrackName.value = playlist.value[idx].name;
+      trimTrackPath.value = playlist.value[idx].path || '';
+      showTrimDialog.value = true;
+      closeContextMenu();
+      return;
     case 'remove':
       removeTrack(idx);
       break;
     case 'reveal':
       revealInFinder(playlist.value[idx].path);
-      return; // revealInFinder calls closeContextMenu
+      return;
   }
   closeContextMenu();
+}
+
+// 格式转换
+async function doConvert(format: string, bitrate: string) {
+  showConvertDialog.value = false;
+  if (!convertingTrackPath.value || !isTauri()) {
+    showToast('无法转换（仅支持本地文件）', 'error');
+    return;
+  }
+  showToast('正在转换...', 'info');
+  try {
+    const outPath = await invoke<string>('convert_audio', {
+      source: convertingTrackPath.value,
+      format,
+      bitrate,
+    });
+    showToast(`转换完成: ${outPath.split('/').pop()}`, 'success');
+  } catch (e) {
+    console.error('[convert] failed:', e);
+    showToast('转换失败', 'error');
+  }
+}
+
+// 音频裁剪
+async function doTrim(startSec: number, endSec: number) {
+  showTrimDialog.value = false;
+  if (!trimTrackPath.value || !isTauri()) {
+    showToast('无法裁剪（仅支持本地文件）', 'error');
+    return;
+  }
+  showToast('正在裁剪...', 'info');
+  try {
+    const outPath = await invoke<string>('trim_audio', {
+      source: trimTrackPath.value,
+      startSec,
+      endSec,
+    });
+    showToast(`裁剪完成: ${outPath.split('/').pop()}`, 'success');
+  } catch (e) {
+    console.error('[trim] failed:', e);
+    showToast('裁剪失败', 'error');
+  }
 }
 
 // 在文件管理器中显示
@@ -1017,18 +969,6 @@ function formatTime(s: number) {
   const sec = Math.floor(s % 60).toString().padStart(2, '0');
   return `${m}:${sec}`;
 }
-
-function formatHistoryTime(ts: number): string {
-  const d = new Date(ts);
-  const now = new Date();
-  const diffMs = now.getTime() - d.getTime();
-  const diffMin = Math.floor(diffMs / 60000);
-  if (diffMin < 1) return '刚刚';
-  if (diffMin < 60) return `${diffMin}分钟前`;
-  const diffH = Math.floor(diffMin / 60);
-  if (diffH < 24) return `${diffH}小时前`;
-  return d.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-}
 </script>
 
 <template>
@@ -1136,6 +1076,27 @@ function formatHistoryTime(ts: number): string {
           <p class="lyric-line next" v-if="currentLyricIdx + 1 < lyrics.length">{{ lyrics[currentLyricIdx + 1]?.text }}</p>
         </div>
 
+        <!-- 波形图 -->
+        <div v-if="currentTrack && !isMini" class="waveform-section">
+          <WaveformCanvas
+            :peaks="waveformPeaks"
+            :currentTime="currentTime"
+            :duration="duration"
+            :loading="waveformLoading"
+            @seek="onWaveformSeek"
+          />
+        </div>
+
+        <!-- 音频信息标签行 -->
+        <div v-if="audioInfo && !isMini" class="audio-tags">
+          <span class="audio-tag codec">{{ audioInfo.codec }}</span>
+          <span class="audio-tag">{{ audioInfo.sampleRateStr }}</span>
+          <span class="audio-tag">{{ audioInfo.bitrateStr }}</span>
+          <span class="audio-tag">{{ audioInfo.channelsStr }}</span>
+          <span v-if="audioInfo.bitDepth > 0" class="audio-tag">{{ audioInfo.bitDepthStr }}</span>
+          <span class="audio-tag dim">{{ audioInfo.fileSizeStr }}</span>
+        </div>
+
         <!-- 播放控制区 -->
         <div class="player-controls">
           <div class="progress-section">
@@ -1207,77 +1168,23 @@ function formatHistoryTime(ts: number): string {
       </article>
 
       <!-- 播放列表 -->
-      <aside class="playlist-card">
-        <div class="playlist-header">
-          <div class="playlist-tabs">
-            <button
-              class="tab-btn"
-              :class="{ active: playlistFilter === 'all' }"
-              @click="playlistFilter = 'all'"
-            >
-              全部<span class="tab-count">{{ playlist.length }}</span>
-            </button>
-            <button
-              class="tab-btn"
-              :class="{ active: playlistFilter === 'favorites' }"
-              @click="playlistFilter = 'favorites'"
-            >
-              ❤️ 收藏<span class="tab-count">{{ favorites.length }}</span>
-            </button>
-            <button
-              class="tab-btn"
-              :class="{ active: playlistFilter === 'history' }"
-              @click="playlistFilter = 'history'"
-            >
-              🕐 历史<span class="tab-count">{{ playHistory.length }}</span>
-            </button>
-          </div>
-          <button v-if="playlistFilter === 'history' && playHistory.length > 0" type="button" class="action-btn danger" style="padding:0.35rem 0.65rem;font-size:0.75rem;flex-shrink:0" @click="playHistory.length = 0; showToast('播放历史已清空', 'success')">清空历史</button>
-        </div>
-        <ul class="playlist-list" v-if="filteredPlaylist.length > 0">
-          <li v-for="(item, fi) in filteredPlaylist" :key="item.track.url" :class="{ active: item.idx === currentIndex }">
-            <div class="playlist-row" @contextmenu="onTrackContextMenu($event, item.idx)">
-              <button type="button" class="playlist-item"
-                @click="playlistFilter === 'favorites' ? selectFavoritesTrack(fi) : playlistFilter === 'history' ? (item.idx >= 0 ? selectTrack(item.idx) : null) : selectTrack(item.idx)">
-                <span class="item-index">
-                  <template v-if="item.idx === currentIndex && isPlaying">
-                    <span class="eq-bars"><i></i><i></i><i></i><i></i></span>
-                  </template>
-                  <template v-else-if="playlistFilter === 'history' && (item as any).time">
-                    {{ formatHistoryTime((item as any).time) }}
-                  </template>
-                  <template v-else>{{ playlistFilter === 'favorites' ? fi + 1 : item.idx + 1 }}</template>
-                </span>
-                <span class="item-name" :class="{ dimmed: playlistFilter === 'history' && item.idx < 0 }">{{ item.track.name }}</span>
-                <span v-if="isFavorited(item.track)" class="item-favor">❤️</span>
-              </button>
-              <button v-if="playlistFilter === 'history'" type="button" class="remove-btn" @click.stop="playHistory.splice(fi, 1)" title="清除记录">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-              </button>
-              <button v-else type="button" class="remove-btn"
-                @click.stop="playlistFilter === 'favorites' ? removeFromFavorites(fi) : removeTrack(item.idx)"
-                title="移除">
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-              </button>
-            </div>
-          </li>
-        </ul>
-        <div v-else class="empty-state">
-          <div class="empty-icon">
-            <svg v-if="playlistFilter === 'favorites'" width="56" height="56" viewBox="0 0 24 24" fill="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            <svg v-else-if="playlistFilter === 'history'" width="56" height="56" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.2"/><path d="M12 6v6l4 2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
-            <svg v-else width="56" height="56" viewBox="0 0 24 24" fill="none"><path d="M9 18V5l12-2v13" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="18" r="2.5" stroke="currentColor" stroke-width="1.2"/><circle cx="18" cy="16" r="2.5" stroke="currentColor" stroke-width="1.2"/></svg>
-          </div>
-          <p class="empty-title">
-            {{ playlistFilter === 'favorites' ? '暂无收藏' : playlistFilter === 'history' ? '暂无记录' : '列表为空' }}
-          </p>
-          <p class="empty-desc">
-            <template v-if="playlistFilter === 'favorites'">点击曲目旁的 ♡ 即可收藏</template>
-            <template v-else-if="playlistFilter === 'history'">播放过的曲目会出现在这里</template>
-            <template v-else>拖拽音频文件到此处<br>或点击「导入音频」开始</template>
-          </p>
-        </div>
-      </aside>
+      <PlaylistSidebar
+        :playlist="playlist"
+        :favorites="favorites"
+        :playHistory="playHistory"
+        :currentIndex="currentIndex"
+        :isPlaying="isPlaying"
+        :playlistFilter="playlistFilter"
+        :filteredPlaylist="filteredPlaylist"
+        @update:playlistFilter="playlistFilter = $event"
+        @selectTrack="selectTrack"
+        @selectFavoritesTrack="selectFavoritesTrack"
+        @removeTrack="removeTrack"
+        @removeFromFavorites="removeFromFavorites"
+        @removeHistory="(i: number) => playHistory.splice(i, 1)"
+        @clearHistory="playHistory.length = 0; showToast('播放历史已清空', 'success')"
+        @contextMenu="onTrackContextMenu"
+      />
     </section>
 
     </div>
@@ -1294,182 +1201,49 @@ function formatHistoryTime(ts: number): string {
       </div>
     </Teleport>
 
-    <!-- 右键菜单 -->
-    <Teleport to="body">
-      <div
-        v-if="contextMenu.visible"
-        class="context-menu-overlay"
-        :style="{ left: contextMenu.x + 'px', top: contextMenu.y + 'px' }"
-        @click.stop
-      >
-        <button class="ctx-item" @click="onContextMenuAction('play')">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M5 3l14 9-14 9V3z" fill="currentColor"/></svg>
-          播放
-        </button>
-        <button class="ctx-item" @click="onContextMenuAction('favor')">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          收藏/取消
-        </button>
-        <div class="ctx-divider"></div>
-        <button class="ctx-item" @click="onContextMenuAction('reveal')">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-          在 Finder 中显示
-        </button>
-        <div class="ctx-divider"></div>
-        <button class="ctx-item danger" @click="onContextMenuAction('remove')">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-          移除
-        </button>
-      </div>
-    </Teleport>
-
-    <!-- 快捷键面板 -->
-    <Teleport to="body">
-      <transition name="fade-scale">
-        <div v-if="showShortcuts" class="shortcuts-overlay" @click.self="showShortcuts = false">
-          <div class="shortcuts-panel">
-            <div class="shortcuts-header">
-              <h3>快捷键</h3>
-              <button class="shortcuts-close" @click="showShortcuts = false">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-              </button>
-            </div>
-            <div class="shortcuts-grid">
-              <div class="shortcut-row"><kbd>Space</kbd><span>播放 / 暂停</span></div>
-              <div class="shortcut-row"><kbd>←</kbd><span>上一首</span></div>
-              <div class="shortcut-row"><kbd>→</kbd><span>下一首</span></div>
-              <div class="shortcut-row"><kbd>S</kbd><span>随机播放</span></div>
-              <div class="shortcut-row"><kbd>R</kbd><span>切换循环模式</span></div>
-              <div class="shortcut-row"><kbd>F</kbd><span>收藏当前曲目</span></div>
-              <div class="shortcut-row"><kbd>O</kbd><span>导入音频</span></div>
-              <div class="shortcut-row"><kbd>?</kbd><span>显示 / 隐藏此面板</span></div>
-              <div class="shortcut-row"><kbd>右键</kbd><span>曲目操作菜单</span></div>
-            </div>
-          </div>
-        </div>
-      </transition>
-    </Teleport>
-
-    <!-- 关于面板 -->
-    <Teleport to="body">
-      <transition name="fade-scale">
-        <div v-if="showAbout" class="shortcuts-overlay" @click.self="showAbout = false">
-          <div class="about-panel">
-            <div class="about-header">
-              <div class="about-brand">
-                <div class="about-icon">
-                  <svg width="40" height="40" viewBox="0 0 24 24" fill="none">
-                    <rect x="5" y="6" width="2.2" height="12" rx="1.1" fill="currentColor" opacity="0.6"/>
-                    <rect x="8.6" y="2" width="2.6" height="20" rx="1.3" fill="currentColor"/>
-                    <rect x="12.5" y="4.5" width="3" height="4" rx="1.5" fill="currentColor"/>
-                    <rect x="16.8" y="2" width="2.6" height="20" rx="1.3" fill="currentColor"/>
-                    <rect x="20.8" y="6" width="2.2" height="12" rx="1.1" fill="currentColor" opacity="0.6"/>
-                  </svg>
-                </div>
-                <div>
-                  <h2>Hanono</h2>
-                  <p class="about-version">版本 0.1.0</p>
-                </div>
-              </div>
-              <button class="shortcuts-close" @click="showAbout = false">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-              </button>
-            </div>
-            <p class="about-desc">沉浸式本地音乐播放器。支持 FLAC / MP3 / WAV / OGG 等主流格式，拖拽导入、播放列表持久化、系统菜单集成。</p>
-            <div class="about-meta">
-              <div class="about-meta-item">
-                <span class="meta-label">技术栈</span>
-                <span class="meta-value">Tauri 2 + Vue 3 + Rust</span>
-              </div>
-              <div class="about-meta-item">
-                <span class="meta-label">数据存储</span>
-                <span class="meta-value">SQLite (本地)</span>
-              </div>
-              <div class="about-meta-item">
-                <span class="meta-label">平台支持</span>
-                <span class="meta-value">macOS · Windows · Linux</span>
-              </div>
-            </div>
-            <p class="about-copyright">© 2026 Hanono. All rights reserved.</p>
-          </div>
-        </div>
-      </transition>
-    </Teleport>
+    <!-- 右键菜单 + 快捷键 + 关于 -->
+    <AppModals
+      :showShortcuts="showShortcuts"
+      :showAbout="showAbout"
+      :contextMenu="contextMenu"
+      @closeShortcuts="showShortcuts = false"
+      @closeAbout="showAbout = false"
+      @contextMenuAction="onContextMenuAction"
+      @closeContextMenu="closeContextMenu"
+    />
 
     <!-- 音效面板 -->
-    <Teleport to="body">
-      <transition name="fade-scale">
-        <div v-if="showFxPanel" class="shortcuts-overlay" @click.self="showFxPanel = false">
-          <div class="fx-panel">
-            <div class="shortcuts-header">
-              <h3>🎛️ 音效增强</h3>
-              <button class="shortcuts-close" @click="showFxPanel = false">
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/></svg>
-              </button>
-            </div>
-
-            <!-- EQ 预设 -->
-            <div class="fx-section">
-              <label class="fx-label">预设</label>
-              <div class="preset-grid">
-                <button v-for="(_g, key) in eqPresets" :key="key"
-                  class="preset-btn" :class="{ active: currentPreset === key }"
-                  @click="applyPreset(key as EqPresetKey)"
-                >{{ key === 'flat' ? '默认' : key === 'pop' ? '流行' : key === 'rock' ? '摇滚' : key === 'jazz' ? '爵士' : key === 'classical' ? '古典' : key === 'vocal' ? '人声' : '低音' }}</button>
-              </div>
-            </div>
-
-            <!-- 5段均衡器 -->
-            <div class="fx-section">
-              <label class="fx-label">均衡器</label>
-              <div class="eq-sliders">
-                <div v-for="(band, i) in eqBands" :key="band.name" class="eq-band">
-                  <input class="eq-slider" type="range" min="-12" max="12" step="0.5"
-                    :value="band.gain.value" @input="onEqBandInput(i, $event)" />
-                  <span class="eq-db">{{ band.gain.value > 0 ? '+' : '' }}{{ band.gain.value.toFixed(1) }}dB</span>
-                  <span class="eq-freq">{{ band.name }}</span>
-                </div>
-              </div>
-            </div>
-
-            <!-- 低音增强 -->
-            <div class="fx-section">
-              <label class="fx-label">
-                低音增强
-                <span class="fx-val">{{ bassBoost > 0 ? '+' + bassBoost.toFixed(1) + 'dB' : '关闭' }}</span>
-              </label>
-              <input class="fx-range" type="range" min="0" max="15" step="0.5"
-                :value="bassBoost" @input="onBassBoostInput" />
-            </div>
-
-            <!-- 3D环绕 -->
-            <div class="fx-section">
-              <label class="fx-label">
-                3D环绕
-                <span class="fx-val">{{ surroundAmount > 0 ? (surroundAmount * 100).toFixed(0) + '%' : '关闭' }}</span>
-              </label>
-              <input class="fx-range" type="range" min="0" max="1" step="0.05"
-                :value="surroundAmount" @input="onSurroundInput" />
-            </div>
-
-            <!-- 混响 -->
-            <div class="fx-section">
-              <label class="fx-label">
-                混响
-                <span class="fx-val">{{ reverbAmount > 0 ? (reverbAmount * 100).toFixed(0) + '%' : '关闭' }}</span>
-              </label>
-              <input class="fx-range" type="range" min="0" max="1" step="0.05"
-                :value="reverbAmount" @input="onReverbInput" />
-            </div>
-
-            <!-- 重置 -->
-            <div style="display:flex;justify-content:flex-end;margin-top:0.75rem">
-              <button class="action-btn ghost" @click="resetAllEffects()">重置全部</button>
-            </div>
-          </div>
-        </div>
-      </transition>
-    </Teleport>
+    <FxPanel
+      :show="showFxPanel"
+      :eqBands="eqBands"
+      :bassBoost="bassBoost"
+      :surroundAmount="surroundAmount"
+      :reverbAmount="reverbAmount"
+      :currentPreset="currentPreset"
+      :eqPresets="eqPresets"
+      @close="showFxPanel = false"
+      @applyPreset="applyPreset"
+      @onBassBoostInput="onBassBoostInput"
+      @onSurroundInput="onSurroundInput"
+      @onReverbInput="onReverbInput"
+      @onEqBandInput="onEqBandInput"
+      @resetAll="resetAllEffects"
+    />
+    <!-- 格式转换对话框 -->
+    <ConvertDialog
+      :show="showConvertDialog"
+      :trackName="convertingTrackName"
+      @close="showConvertDialog = false"
+      @convert="doConvert"
+    />
+    <!-- 音频裁剪对话框 -->
+    <TrimDialog
+      :show="showTrimDialog"
+      :trackName="trimTrackName"
+      :duration="duration"
+      @close="showTrimDialog = false"
+      @trim="doTrim"
+    />
   </main>
 </template>
 
@@ -2203,393 +1977,38 @@ function formatHistoryTime(ts: number): string {
   font-size: 0.82rem;
 }
 
-/* ========== 右键菜单 ========== */
-.context-menu-overlay {
-  position: fixed;
-  z-index: 9999;
-  min-width: 180px;
-  background: rgba(18, 18, 36, 0.98);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border: 1px solid var(--border-medium);
-  border-radius: 12px;
-  padding: 6px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+/* ========== 波形图 ========== */
+.waveform-section {
+  padding: 0.25rem 0;
+}
+
+/* ========== 音频信息标签行 ========== */
+.audio-tags {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 0.35rem;
 }
 
-.ctx-item {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.55rem 0.85rem;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: #cbd5e1;
-  font-size: 0.85rem;
-  cursor: pointer;
-  font-family: inherit;
-  transition: all 0.15s ease;
-  text-align: left;
-  width: 100%;
-}
-
-.ctx-item:hover {
-  background: rgba(99, 102, 241, 0.12);
-  color: #e2e8f0;
-}
-
-.ctx-item.danger:hover {
-  background: rgba(239, 68, 68, 0.15);
-  color: #fca5a5;
-}
-
-.ctx-divider {
-  height: 1px;
-  background: rgba(99, 102, 241, 0.1);
-  margin: 3px 0.5rem;
-}
-
-/* ========== 快捷键面板 ========== */
-.shortcuts-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 9998;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
-}
-
-.shortcuts-panel {
-  background: rgba(18, 18, 36, 0.98);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid var(--border-medium);
-  border-radius: 16px;
-  padding: 1.5rem;
-  min-width: 320px;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
-}
-
-.shortcuts-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 1.25rem;
-}
-
-.shortcuts-header h3 {
-  margin: 0;
-  font-size: 1.1rem;
-  font-weight: 700;
-  color: #f8fafc;
-}
-
-.shortcuts-close {
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  border: none;
-  background: rgba(255, 255, 255, 0.06);
-  color: #94a3b8;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.15s ease;
-}
-
-.shortcuts-close:hover {
-  background: rgba(255, 255, 255, 0.12);
-  color: #f1f5f9;
-}
-
-.shortcuts-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-}
-
-.shortcut-row {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  font-size: 0.85rem;
-  color: #cbd5e1;
-}
-
-.shortcut-row kbd {
-  min-width: 48px;
-  text-align: center;
-  background: rgba(99, 102, 241, 0.1);
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  border-radius: 6px;
-  padding: 3px 8px;
-  font-size: 0.78rem;
-  font-family: inherit;
-  color: #e2e8f0;
-}
-
-/* 过渡动画 */
-.fade-scale-enter-active,
-.fade-scale-leave-active {
-  transition: opacity 0.22s ease, transform 0.22s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.fade-scale-enter-from,
-.fade-scale-leave-to {
-  opacity: 0;
-  transform: scale(0.92) translateY(8px);
-}
-
-.fade-scale-enter-to,
-.fade-scale-leave-from {
-  opacity: 1;
-  transform: scale(1) translateY(0);
-}
-
-/* ========== 关于面板 ========== */
-.about-panel {
-  background: rgba(18, 18, 36, 0.98);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid var(--border-medium);
-  border-radius: 16px;
-  padding: 1.5rem;
-  max-width: 420px;
-  width: 90%;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
-}
-
-.about-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 1.25rem;
-}
-
-.about-brand {
-  display: flex;
-  align-items: center;
-  gap: 0.85rem;
-}
-
-.about-icon {
-  width: 56px;
-  height: 56px;
-  border-radius: 16px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  box-shadow: 0 8px 24px rgba(99, 102, 241, 0.35);
-  flex-shrink: 0;
-}
-
-.about-header h2 {
-  margin: 0;
-  font-size: 1.35rem;
-  font-weight: 700;
-  color: #f8fafc;
-  letter-spacing: -0.02em;
-}
-
-.about-version {
-  margin: 4px 0 0 0;
-  font-size: 0.82rem;
-  color: #a5b4fc;
+.audio-tag {
+  font-size: 0.65rem;
   font-weight: 500;
-}
-
-.about-desc {
-  margin: 0 0 1.25rem 0;
-  font-size: 0.88rem;
-  line-height: 1.65;
-  color: #cbd5e1;
-}
-
-.about-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 0.6rem;
-  margin-bottom: 1.25rem;
-  padding: 0.85rem 1rem;
-  background: rgba(99, 102, 241, 0.06);
-  border-radius: 10px;
-  border: 1px solid rgba(99, 102, 241, 0.12);
-}
-
-.about-meta-item {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  font-size: 0.82rem;
-}
-
-.meta-label {
-  color: #94a3b8;
-}
-
-.meta-value {
-  color: #e2e8f0;
-  font-weight: 500;
-}
-
-.about-copyright {
-  margin: 0;
-  font-size: 0.75rem;
-  color: #64748b;
-  text-align: center;
-}
-
-/* ========== 音效面板 ========== */
-.fx-panel {
-  background: rgba(18, 18, 36, 0.98);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid var(--border-medium);
-  border-radius: 16px;
-  padding: 1.5rem;
-  max-width: 480px;
-  width: 92%;
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.fx-section {
-  margin-bottom: 1rem;
-}
-
-.fx-label {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: #e2e8f0;
-  margin-bottom: 0.5rem;
-}
-
-.fx-val {
-  font-weight: 500;
-  font-size: 0.78rem;
-  color: var(--accent-3);
-}
-
-.fx-range {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 6px;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
-  cursor: pointer;
-  outline: none;
-}
-
-.fx-range::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  border: 2px solid #fff;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-}
-
-/* 预设按钮网格 */
-.preset-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 0.4rem;
-}
-
-.preset-btn {
-  padding: 0.45rem 0.65rem;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
+  color: rgba(255, 255, 255, 0.35);
   background: rgba(255, 255, 255, 0.04);
-  color: #94a3b8;
-  font-size: 0.78rem;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-  transition: all 0.18s ease;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 5px;
+  padding: 2px 7px;
   white-space: nowrap;
 }
 
-.preset-btn:hover {
+.audio-tag.codec {
+  color: var(--accent-3);
   background: rgba(99, 102, 241, 0.1);
-  color: #e2e8f0;
-  border-color: rgba(99, 102, 241, 0.25);
+  border-color: rgba(99, 102, 241, 0.15);
 }
 
-.preset-btn.active {
-  background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(139, 92, 246, 0.2));
-  color: var(--accent-3);
-  border-color: var(--accent);
-  font-weight: 600;
-}
-
-/* 均衡器滑条 */
-.eq-sliders {
-  display: flex;
-  gap: 0.5rem;
-  justify-content: center;
-}
-
-.eq-band {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.3rem;
-  flex: 1;
-  max-width: 64px;
-}
-
-.eq-slider {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 6px;
-  cursor: pointer;
-  background: rgba(255, 255, 255, 0.08);
-  border-radius: 999px;
-  outline: none;
-  margin-bottom: 0.3rem;
-}
-
-.eq-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  border: 2px solid #fff;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-}
-
-.eq-db {
-  font-size: 0.65rem;
-  font-weight: 600;
-  color: var(--accent-3);
-  font-variant-numeric: tabular-nums;
-}
-
-.eq-freq {
-  font-size: 0.68rem;
-  color: #64748b;
-  font-weight: 500;
+.audio-tag.dim {
+  opacity: 0.5;
 }
 
 /* FX 按钮高亮 */
@@ -2616,191 +2035,6 @@ function formatHistoryTime(ts: number): string {
 
 /* ========== 播放列表 ========== */
 .playlist-card { overflow: hidden; }
-
-.playlist-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
-  flex-shrink: 0;
-}
-
-.playlist-header h2 {
-  margin: 0;
-  font-size: 1.2rem;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-}
-
-/* 播放列表 Tab 切换 */
-.playlist-tabs {
-  display: flex;
-  gap: 0.3rem;
-  background: rgba(255, 255, 255, 0.04);
-  border-radius: 10px;
-  padding: 3px;
-}
-
-.tab-btn {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.4rem 0.75rem;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 0.82rem;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-  transition: all 0.18s ease;
-  white-space: nowrap;
-}
-
-.tab-btn:hover {
-  color: var(--text-secondary);
-}
-
-.tab-btn.active {
-  background: rgba(99, 102, 241, 0.2);
-  color: var(--accent-3);
-}
-
-.tab-count {
-  background: rgba(255, 255, 255, 0.06);
-  border-radius: 6px;
-  padding: 1px 6px;
-  font-size: 0.7rem;
-  font-weight: 600;
-}
-
-.tab-btn.active .tab-count {
-  background: rgba(99, 102, 241, 0.25);
-}
-
-.playlist-count { margin: 0.3rem 0 0; color: var(--text-secondary); font-size: 0.85rem; }
-.count-num { color: var(--accent-3); font-weight: 700; }
-
-/* 列表 */
-.playlist-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  overflow-y: auto;
-  flex: 1;
-  min-height: 0;
-}
-
-.playlist-list::-webkit-scrollbar { width: 3px; }
-.playlist-list::-webkit-scrollbar-track { background: transparent; }
-.playlist-list::-webkit-scrollbar-thumb { background: transparent; border-radius: 999px; transition: background 0.3s; }
-.playlist-list:hover::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.12); }
-
-.playlist-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  border-radius: 12px;
-  transition: background 0.15s ease;
-}
-
-.playlist-row:hover { background: rgba(255, 255, 255, 0.04); }
-
-li.active .playlist-row {
-  background: rgba(99, 102, 241, 0.1);
-  border: 1px solid rgba(99, 102, 241, 0.2);
-  border-radius: 12px;
-}
-
-.playlist-item {
-  flex: 1 1 auto;
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-  padding: 0.55rem 0.7rem;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--text-secondary);
-  border: none;
-  cursor: pointer;
-  text-align: left;
-  min-width: 0;
-  font-size: 0.88rem;
-  transition: color 0.15s ease;
-}
-
-li.active .playlist-item { color: var(--text-primary); }
-
-.item-index {
-  width: 1.8rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 0.75rem;
-  color: var(--text-muted);
-  flex-shrink: 0;
-}
-
-li.active .item-index { color: var(--accent-3); }
-
-.item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-/* EQ 动画条 */
-.eq-bars { display: flex; align-items: flex-end; gap: 2px; height: 16px; }
-
-.eq-bars i {
-  width: 2.5px;
-  background: var(--accent-3);
-  border-radius: 2px;
-  animation: eq-wave 0.8s ease-in-out infinite;
-}
-
-.eq-bars i:nth-child(1) { height: 8px; animation-delay: 0s; }
-.eq-bars i:nth-child(2) { height: 14px; animation-delay: 0.15s; }
-.eq-bars i:nth-child(3) { height: 10px; animation-delay: 0.3s; }
-.eq-bars i:nth-child(4) { height: 12px; animation-delay: 0.45s; }
-
-@keyframes eq-wave {
-  0%, 100% { transform: scaleY(0.5); }
-  50% { transform: scaleY(1); }
-}
-
-.remove-btn {
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  padding: 0.4rem;
-  border-radius: 8px;
-  opacity: 0;
-  transition: all 0.15s ease;
-  flex-shrink: 0;
-}
-
-.playlist-row:hover .remove-btn { opacity: 1; }
-.remove-btn:hover { background: rgba(239, 68, 68, 0.15); color: #f87171; }
-
-/* 空状态 */
-.empty-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 0.75rem;
-  padding: 2rem 1.5rem;
-  text-align: center;
-  flex: 1;
-}
-
-.empty-icon { color: var(--text-muted); opacity: 0.4; margin-bottom: 0.5rem; }
-.empty-title { font-size: 1rem; font-weight: 600; color: var(--text-secondary); margin: 0; }
-.empty-desc { font-size: 0.8rem; color: var(--text-muted); margin: 0; line-height: 1.6; }
 
 .hidden-input { position: fixed; left: -9999px; top: 0; }
 
