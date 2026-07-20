@@ -160,6 +160,7 @@ const currentLyricIdx = ref(-1);
 const waveformPeaks = ref<number[]>([]);
 const waveformLoading = ref(false);
 let waveformAbortId = 0;
+let infoAbortId = 0;
 
 // 音频详情
 interface AudioInfo {
@@ -252,26 +253,62 @@ function onWaveformSeek(time: number) {
 // 音频详情
 async function loadAudioInfo(track: Track) {
   audioInfo.value = null;
+  const currentAbortId = ++infoAbortId;
   if (!track.path || !isTauri()) return;
 
   try {
     const result = await invoke<AudioInfo>('get_audio_info', { path: track.path });
+    if (currentAbortId !== infoAbortId) return;
     audioInfo.value = result;
   } catch (e) {
+    if (currentAbortId !== infoAbortId) return;
     console.warn('[audio-info] failed:', e);
   }
 
-  // Also analyze loudness (fire-and-forget style)
+  // Analyze loudness in background
   try {
     const loud = await invoke<{ offsetNum: number; integrated: string }>('analyze_loudness', { path: track.path });
+    if (currentAbortId !== infoAbortId) return;
     if (audioInfo.value && loud.offsetNum !== 0) {
-      // Apply gain offset to master volume (clamp to reasonable range)
       const gainDb = Math.max(-10, Math.min(10, loud.offsetNum));
       const gainLinear = Math.pow(10, gainDb / 20);
       (audioInfo.value as any)._loudnessGain = gainLinear;
+      // 立即生效
+      setMasterVolume(volume.value * gainLinear);
     }
   } catch (e) {
+    if (currentAbortId !== infoAbortId) return;
     console.warn('[loudness] analysis failed:', e);
+  }
+}
+
+// 提取专辑封面
+async function loadCoverArt(track: Track) {
+  coverArtUrl.value = null;
+  coverLoaded.value = false;
+  if (!track.path || !isTauri()) return;
+
+  try {
+    const result = await invoke<string | null>('extract_cover_art', { path: track.path });
+    if (result) {
+      const url = convertFileSrc(result);
+      // Verify the image actually loads
+      const img = new Image();
+      img.onload = () => {
+        coverArtUrl.value = url;
+        coverLoaded.value = true;
+      };
+      img.onerror = () => {
+        coverArtUrl.value = null;
+        coverLoaded.value = true;
+      };
+      img.src = url;
+    } else {
+      coverLoaded.value = true;
+    }
+  } catch (e) {
+    console.warn('[cover] extraction failed:', e);
+    coverLoaded.value = true;
   }
 }
 
@@ -318,6 +355,10 @@ const currentTrack = computed(() => playlist.value[currentIndex.value] ?? null);
 const coverLetter = computed(() => {
   return currentTrack.value?.name?.trim()?.charAt(0)?.toUpperCase() || 'M';
 });
+
+// 封面图片 URL（专辑封面优先，否则显示首字母）
+const coverArtUrl = ref<string | null>(null);
+const coverLoaded = ref(false);
 
 async function addFiles(files: FileList | File[]) {
   const arr = Array.isArray(files) ? files : Array.from(files);
@@ -386,12 +427,18 @@ async function addPaths(paths: string[]) {
 function loadCurrent() {
   const item = playlist.value[currentIndex.value];
   if (!item) return;
+  // 先彻底停止旧音源，防止多首歌同时播放
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  // 再加载新音源
   audio.src = item.url;
   audio.playbackRate = playbackRate.value;
   audio.load();
   loadLyrics(item);
   loadWaveform(item);
   loadAudioInfo(item);
+  loadCoverArt(item);
   setupMediaSession(item);
 }
 
@@ -1028,8 +1075,9 @@ function formatTime(s: number) {
             @click="cycleCoverEffect"
             :title="'封面动效: ' + effectLabels[coverEffect] + ' (点击切换)'"
           >
-            <div class="cover-art">
-              <span v-if="currentTrack" class="cover-letter">{{ coverLetter }}</span>
+            <div class="cover-art" :class="{ 'has-cover': coverArtUrl }">
+              <img v-if="coverArtUrl" :src="coverArtUrl" class="cover-img" alt="专辑封面" />
+              <span v-else-if="currentTrack" class="cover-letter">{{ coverLetter }}</span>
               <svg v-else class="cover-placeholder" width="64" height="64" viewBox="0 0 24 24" fill="none">
                 <path d="M9 18V5l12-2v13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
                 <circle cx="6" cy="18" r="3" stroke="currentColor" stroke-width="1.5"/>
@@ -1505,6 +1553,23 @@ function formatTime(s: number) {
   color: #fff;
   z-index: 2;
   text-shadow: 0 2px 10px rgba(0,0,0,0.2);
+}
+
+.cover-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  z-index: 1;
+}
+
+.cover-art.has-cover {
+  background: none;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.4);
+}
+
+.cover-art.has-cover::after {
+  display: none;
 }
 
 .cover-placeholder {

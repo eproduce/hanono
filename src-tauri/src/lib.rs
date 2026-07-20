@@ -692,6 +692,82 @@ fn do_trim_audio(source: &str, start_sec: f64, end_sec: f64) -> Result<String, S
     Ok(out_path_str)
 }
 
+/// Extract embedded album art from an audio file.
+/// Returns the path to the extracted image file, or null if no art found.
+#[tauri::command]
+fn extract_cover_art(state: tauri::State<DbState>, path: String) -> Result<Option<String>, String> {
+    use symphonia::core::meta::StandardVisualKey;
+
+    let src = std::fs::File::open(&path).map_err(|e| format!("open file: {}", e))?;
+    let mss = MediaSourceStream::new(Box::new(src), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = std::path::Path::new(&path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let mut probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("probe format: {}", e))?;
+
+    // Get metadata revisions
+    let metadata = probed.format.metadata();
+    let current = metadata.current();
+
+    // Look for cover art in all metadata revisions
+    let mut cover_data: Option<(Vec<u8>, String)> = None; // (bytes, extension)
+
+    if let Some(rev) = current {
+        for visual in rev.visuals() {
+            // Prefer FrontCover, but accept any
+            let is_cover = match visual.usage {
+                Some(StandardVisualKey::FrontCover) => true,
+                Some(StandardVisualKey::OtherIcon) => true,
+                None => {
+                    // Generic picture — likely a cover
+                    cover_data.is_none()
+                }
+                _ => false,
+            };
+
+            if is_cover {
+                let ext = match visual.media_type.as_str() {
+                    "image/jpeg" | "image/jpg" => "jpg",
+                    "image/png" => "png",
+                    "image/bmp" => "bmp",
+                    "image/gif" => "gif",
+                    "image/webp" => "webp",
+                    _ => "jpg", // default
+                };
+                cover_data = Some((visual.data.to_vec(), ext.to_string()));
+                break; // Take first cover
+            }
+        }
+    }
+
+    match cover_data {
+        Some((data, ext)) => {
+            // Save to app data dir
+            let mut dest_dir = state.app_data_dir.clone();
+            dest_dir.push("covers");
+            fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+
+            // Use hash of path as filename to avoid collisions
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            path.hash(&mut hasher);
+            let hash = format!("{:016x}", hasher.finish());
+
+            let dest = dest_dir.join(format!("{}.{}", hash, ext));
+            fs::write(&dest, &data).map_err(|e| format!("write cover: {}", e))?;
+
+            eprintln!("[cover] extracted → {}", dest.display());
+            Ok(Some(dest.to_string_lossy().to_string()))
+        }
+        None => Ok(None),
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -868,7 +944,7 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, get_audio_info, convert_audio, analyze_loudness, trim_audio])
+        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {});
