@@ -14,14 +14,14 @@ permissions:
   pull-requests: write
 
 jobs:
-  # ── release-please：自动版本管理（仅 main 分支 push/PR 时运行）──
+  # ── release-please：自动版本管理 + CHANGELOG ──
   release-please:
-    if: github.ref == 'refs/heads/main' || github.event_name == 'pull_request'
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
-      version: ${{ steps.release.outputs.version }}
+      pr: ${{ steps.release.outputs.pr }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: release
@@ -30,16 +30,23 @@ jobs:
           config-file: .github/release-please-config.json
           manifest-file: .github/release-please-manifest.json
 
-  # ── 全平台构建 ──
-  build:
+  # ── 自动合并 release PR ──
+  auto-merge-release-pr:
     needs: release-please
-    if: |
-      always() &&
-      (
-        github.ref == 'refs/heads/main' ||
-        startsWith(github.ref, 'refs/tags/v') ||
-        github.event_name == 'workflow_dispatch'
-      )
+    if: needs.release-please.outputs.pr != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Auto-merge release PR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_NUM="${{ needs.release-please.outputs.pr }}"
+          echo "Auto-merging release PR #$PR_NUM"
+          gh pr merge "$PR_NUM" --squash --delete-branch --subject "chore: release ${{ needs.release-please.outputs.tag_name }}" || true
+
+  # ── 全平台构建 + 发布（仅在 tag 推送或手动触发时）──
+  build:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:

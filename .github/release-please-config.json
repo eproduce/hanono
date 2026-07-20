@@ -21,11 +21,6 @@
           "type": "toml",
           "path": "src-tauri/Cargo.toml",
           "jsonpath": "$.package.version"
-        },
-        {
-          "type": "generic",
-          "path": "README.md",
-          "pattern": "version-([\\d.]+)-blue"
         }
       ]
     }
