@@ -376,6 +376,140 @@ fn do_generate_waveform(path: &str, num_peaks: usize) -> Result<serde_json::Valu
     }))
 }
 
+/// Fast waveform via ffmpeg (resample to 8kHz mono → raw f32 pipe → compute peaks).
+/// Falls back to symphonia if ffmpeg unavailable.
+#[tauri::command]
+async fn generate_waveform_fast(state: tauri::State<'_, DbState>, path: String, num_peaks: Option<usize>) -> Result<serde_json::Value, String> {
+    let num_peaks = num_peaks.unwrap_or(1500);
+    let app_data = state.app_data_dir.clone();
+
+    tokio::task::spawn_blocking(move || do_generate_waveform_fast(&path, num_peaks, &app_data))
+        .await
+        .map_err(|e| format!("waveform thread panic: {}", e))?
+}
+
+fn do_generate_waveform_fast(path: &str, num_peaks: usize, app_data_dir: &PathBuf) -> Result<serde_json::Value, String> {
+    // Check cache first
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let hash = format!("{:016x}", hasher.finish());
+
+    let mut cache_dir = app_data_dir.clone();
+    cache_dir.push("waveforms");
+    fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
+    let cache_path = cache_dir.join(format!("{}.json", hash));
+
+    if cache_path.exists() {
+        if let Ok(data) = fs::read_to_string(&cache_path) {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) {
+                eprintln!("[waveform] cache hit: {}", cache_path.display());
+                return Ok(val);
+            }
+        }
+    }
+
+    // Try ffmpeg fast path
+    let result = try_ffmpeg_waveform(path, num_peaks);
+    match result {
+        Ok(val) => {
+            // Cache it
+            if let Ok(json_str) = serde_json::to_string(&val) {
+                let _ = fs::write(&cache_path, json_str);
+                eprintln!("[waveform] ffmpeg + cached: {}", cache_path.display());
+            }
+            Ok(val)
+        }
+        Err(e) => {
+            eprintln!("[waveform] ffmpeg failed ({}), falling back to symphonia", e);
+            // Fall back to symphonia
+            match do_generate_waveform(path, num_peaks) {
+                Ok(val) => {
+                    if let Ok(json_str) = serde_json::to_string(&val) {
+                        let _ = fs::write(&cache_path, json_str);
+                    }
+                    Ok(val)
+                }
+                Err(e2) => Err(format!("waveform generation failed: {} / {}", e, e2)),
+            }
+        }
+    }
+}
+
+fn try_ffmpeg_waveform(path: &str, num_peaks: usize) -> Result<serde_json::Value, String> {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+
+    auto_download().map_err(|e| format!("ffmpeg download: {}", e))?;
+
+    // Get ffmpeg binary path
+    let ffmpeg_path = ffmpeg_sidecar::paths::ffmpeg_path();
+
+    let mut child = Command::new(ffmpeg_path)
+        .arg("-i").arg(path)
+        .args(["-ac", "1", "-ar", "8000", "-f", "f32le"])
+        .args(["-hide_banner", "-loglevel", "error"])
+        .arg("pipe:1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("ffmpeg spawn: {}", e))?;
+
+    let stdout = child.stdout.take()
+        .ok_or_else(|| "no stdout".to_string())?;
+
+    let mut reader = std::io::BufReader::with_capacity(65536, stdout);
+    let mut buf = [0u8; 4096];
+    let mut samples: Vec<f32> = Vec::with_capacity(480_000);
+
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("read: {}", e))?;
+        if n == 0 { break; }
+        for chunk in buf[..n].chunks_exact(4) {
+            samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+    }
+
+    let status = child.wait().map_err(|e| format!("ffmpeg wait: {}", e))?;
+    if !status.success() {
+        return Err(format!("ffmpeg exit: {}", status));
+    }
+
+    if samples.is_empty() {
+        return Err("no samples from ffmpeg".to_string());
+    }
+
+    // Compute peaks
+    let num_peaks = num_peaks.min(samples.len());
+    let window_size = samples.len() / num_peaks;
+    let mut peaks = Vec::with_capacity(num_peaks);
+
+    let global_max = samples
+        .iter()
+        .fold(0.0f32, |acc, &x| if x.abs() > acc { x.abs() } else { acc });
+
+    if global_max <= 0.0 {
+        return Err("silent audio".to_string());
+    }
+
+    for i in 0..num_peaks {
+        let start = i * window_size;
+        let end = if i == num_peaks - 1 { samples.len() } else { (i + 1) * window_size };
+        let peak = samples[start..end]
+            .iter()
+            .fold(0.0f32, |acc, &x| if x.abs() > acc { x.abs() } else { acc });
+        peaks.push((peak / global_max).clamp(0.0, 1.0));
+    }
+
+    let duration_secs = samples.len() as f64 / 8000.0;
+
+    Ok(serde_json::json!({
+        "peaks": peaks,
+        "sampleRate": 8000,
+        "durationSecs": duration_secs,
+    }))
+}
+
 /// Extract audio metadata: codec, sample rate, bitrate, channels, bit depth, file size, duration.
 #[tauri::command]
 async fn get_audio_info(path: String) -> Result<serde_json::Value, String> {
@@ -944,7 +1078,7 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art])
+        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, generate_waveform_fast, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {});

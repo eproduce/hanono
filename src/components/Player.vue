@@ -218,7 +218,7 @@ function updateLyricIndex() {
   currentLyricIdx.value = -1;
 }
 
-// 波形生成
+// 波形生成（优先 ffmpeg 快速路径 → 自动缓存 → 回退 symphonia）
 async function loadWaveform(track: Track) {
   waveformPeaks.value = [];
   if (!track.path || !isTauri()) return;
@@ -227,7 +227,7 @@ async function loadWaveform(track: Track) {
   waveformLoading.value = true;
 
   try {
-    const result = await invoke<{ peaks: number[]; durationSecs: number }>('generate_waveform', {
+    const result = await invoke<{ peaks: number[] }>('generate_waveform_fast', {
       path: track.path,
       numPeaks: 1500,
     });
@@ -1498,30 +1498,30 @@ function formatTime(s: number) {
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border-radius: var(--radius-xl);
-  padding: 1.5rem;
+  padding: 1.2rem;
   border: 1px solid var(--border-subtle);
   display: flex;
   flex-direction: column;
   transition: border-color 0.3s ease;
 }
 
-.player-card { justify-content: flex-start; padding-top: 1.25rem; }
+.player-card { justify-content: flex-start; padding-top: 1rem; }
 
 /* ========== 封面区域 ========== */
 .cover-section {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1rem;
-  margin-bottom: 1.25rem;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
 }
 
 .cover-art-wrapper { position: relative; flex-shrink: 0; cursor: pointer; }
 
 .cover-art {
-  width: 240px;
-  height: 240px;
-  border-radius: 32px;
+  width: 200px;
+  height: 200px;
+  border-radius: 28px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1547,7 +1547,7 @@ function formatTime(s: number) {
 }
 
 .cover-letter {
-  font-size: 5.5rem;
+  font-size: 4.5rem;
   font-weight: 800;
   letter-spacing: -0.04em;
   color: #fff;
@@ -2153,12 +2153,12 @@ function formatTime(s: number) {
   display: none;
 }
 .player-shell.is-mini .cover-art {
-  width: 160px;
-  height: 160px;
-  border-radius: 24px;
+  width: 140px;
+  height: 140px;
+  border-radius: 20px;
 }
 .player-shell.is-mini .cover-letter {
-  font-size: 3.5rem;
+  font-size: 3rem;
 }
 .player-shell.is-mini .player-card {
   padding-top: 0.5rem;
@@ -2174,8 +2174,8 @@ function formatTime(s: number) {
     overflow-y: auto;
   }
   .player-card { padding-top: 0.75rem; }
-  .cover-art { width: 180px; height: 180px; }
-  .cover-letter { font-size: 4rem; }
+  .cover-art { width: 150px; height: 150px; }
+  .cover-letter { font-size: 3.5rem; }
   .playlist-card { max-height: none; flex: 0 0 auto; min-height: 200px; }
   .playlist-item { font-size: 0.85rem; padding: 0.5rem 0.6rem; }
   .item-index { width: 1.6rem; }

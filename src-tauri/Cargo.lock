@@ -1484,7 +1484,7 @@ dependencies = [
 
 [[package]]
 name = "hanono"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "ffmpeg-sidecar",
  "png 0.17.16",

@@ -14,9 +14,9 @@
       {
         "title": "Hanono",
         "width": 1100,
-        "height": 700,
-        "minWidth": 600,
-        "minHeight": 400,
+        "height": 780,
+        "minWidth": 680,
+        "minHeight": 520,
         "hiddenTitle": true,
         "decorations": true
       }
