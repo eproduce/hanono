@@ -5,6 +5,18 @@ All notable changes to Hanono will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3](https://github.com/eproduce/hanono/compare/v0.4.2...v0.4.3) (2026-07-20)
+
+
+### Features
+
+* 波形图性能大幅优化 + 窗口布局重构 + 专辑封面提取 ([621736a](https://github.com/eproduce/hanono/commit/621736abf051aae87d3251a5ee97933decc1f515))
+
+
+### Performance Improvements
+
+* 波形图 ffmpeg 快速生成 + 磁盘缓存 + 窗口布局优化 ([3c5bb60](https://github.com/eproduce/hanono/commit/3c5bb60799c0b27baa6c4fd379d024ecab4db3cb))
+
 ## [0.4.2](https://github.com/eproduce/hanono/compare/hanono-v0.4.1...hanono-v0.4.2) (2026-07-20)
 
 
