@@ -11,6 +11,7 @@ import AppModals from './AppModals.vue';
 import ConvertDialog from './ConvertDialog.vue';
 import TrimDialog from './TrimDialog.vue';
 import { useAudioEngine } from '../composables/useAudioEngine';
+import { parseLrcWithOffset, parseArtistTitle, searchOnlineLyrics, searchOnlineCover, type LyricLine } from '../composables/useLyricsSearch';
 import type { EqPresetKey } from '../composables/useAudioEngine';
 
 interface Track {
@@ -21,6 +22,7 @@ interface Track {
 }
 
 const audio = new Audio();
+let audioLoadGen = 0; // 加载代际，防止并发加载导致多歌同时播放
 
 // ========== 音效系统 (composable) ==========
 const {
@@ -152,9 +154,11 @@ function toggleMini() {
 }
 
 // 歌词系统
-interface LyricLine { time: number; text: string; }
 const lyrics = ref<LyricLine[]>([]);
 const currentLyricIdx = ref(-1);
+const lyricsLoading = ref(false);
+const lyricsSource = ref<'none' | 'embedded' | 'online' | 'cache'>('none');
+const lyricOffset = ref(0); // 秒，正数=歌词延后，负数=歌词提前
 
 // 波形数据
 const waveformPeaks = ref<number[]>([]);
@@ -180,35 +184,128 @@ interface AudioInfo {
 }
 const audioInfo = ref<AudioInfo | null>(null);
 
-function parseLrc(lrcText: string): LyricLine[] {
-  const lines: LyricLine[] = [];
-  const regex = /\[(\d{2}):(\d{2}(?:\.\d{2,3})?)\](.*)/;
-  for (const line of lrcText.split('\n')) {
-    const m = line.match(regex);
-    if (m) {
-      const min = parseInt(m[1]);
-      const sec = parseFloat(m[2]);
-      const text = m[3].trim();
-      if (text) lines.push({ time: min * 60 + sec, text });
-    }
-  }
-  return lines.sort((a, b) => a.time - b.time);
-}
-
 async function loadLyrics(track: Track) {
   lyrics.value = [];
   currentLyricIdx.value = -1;
-  if (!track.path || !isTauri()) return;
+  lyricsSource.value = 'none';
+  lyricsLoading.value = true;
+
+  if (!track.path || !isTauri()) {
+    lyricsLoading.value = false;
+    return;
+  }
+
+  // Helper: restore saved offset from DB (for tracks without embedded offset)
+  const restoreOffset = async () => {
+    try {
+      const saved = await invoke<number | null>('load_lyric_offset', { path: track.path });
+      if (saved !== null && saved !== undefined) lyricOffset.value = saved;
+      else lyricOffset.value = 0;
+    } catch { lyricOffset.value = 0; }
+  };
+
+  // Step 1: Check for external .lrc file beside the audio file
   const lrcPath = track.path.replace(/\.[^.]+$/, '.lrc');
   try {
     const text = await invoke<string>('read_text_file', { path: lrcPath });
-    lyrics.value = parseLrc(text);
-  } catch { /* 无歌词文件 */ }
+    const { lines, offset } = parseLrcWithOffset(text);
+    if (lines.length > 0) {
+      lyrics.value = lines;
+      lyricsSource.value = 'embedded';
+      lyricOffset.value = offset;
+      if (offset !== 0) {
+        invoke('save_lyric_offset', { path: track.path, offset }).catch(() => {});
+      } else {
+        await restoreOffset();
+      }
+      lyricsLoading.value = false;
+      return;
+    }
+  } catch { /* 无外部歌词文件 */ }
+
+  // Step 2: Try embedded lyrics in the audio file metadata
+  try {
+    const embedded = await invoke<string | null>('extract_embedded_lyrics', { path: track.path });
+    if (embedded && embedded.trim()) {
+      const { lines, offset } = parseLrcWithOffset(embedded);
+      if (lines.length > 0) {
+        lyrics.value = lines;
+        lyricsSource.value = 'embedded';
+        lyricOffset.value = offset;
+        if (offset !== 0) {
+          invoke('save_lyric_offset', { path: track.path, offset }).catch(() => {});
+        } else {
+          await restoreOffset();
+        }
+        lyricsLoading.value = false;
+        return;
+      }
+    }
+  } catch { /* 无内嵌歌词 */ }
+
+  // Step 3: Check SQLite cache (returns JSON { lyrics, offset })
+  try {
+    const cached = await invoke<string | null>('load_lyrics_cache', { path: track.path });
+    if (cached) {
+      const data = JSON.parse(cached) as { lyrics: string; offset: number };
+      if (data.lyrics && data.lyrics.trim()) {
+        const { lines, offset } = parseLrcWithOffset(data.lyrics);
+        if (lines.length > 0) {
+          lyrics.value = lines;
+          lyricsSource.value = 'cache';
+          lyricOffset.value = data.offset !== 0 ? data.offset : offset;
+          lyricsLoading.value = false;
+          return;
+        }
+      }
+    }
+  } catch { /* 缓存读取失败 */ }
+
+  // Step 4: Search online
+  try {
+    const onlineLyrics = await searchOnlineLyrics(track);
+    if (onlineLyrics.length > 0) {
+      lyrics.value = onlineLyrics;
+      lyricsSource.value = 'online';
+      await restoreOffset();
+
+      const lrcText = onlineLyrics.map(l => `[${formatLrcTime(l.time)}]${l.text}`).join('\n');
+      invoke('save_lyrics_cache', { path: track.path, lyrics: lrcText, source: 'online', offset: lyricOffset.value })
+        .catch(() => {});
+    }
+  } catch { /* 在线搜索失败 */ }
+
+  lyricsLoading.value = false;
+}
+
+/** Format seconds to [mm:ss.xx] LRC timestamp */
+function formatLrcTime(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = (sec % 60).toFixed(2);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(5, '0')}`;
+}
+
+/** Embed current lyrics + offset: saves .lrc file + attempts metadata embed */
+async function embedLyricsToFile() {
+  const track = currentTrack.value;
+  if (!track?.path || lyrics.value.length === 0 || !isTauri()) return;
+
+  const lrcText = lyrics.value.map(l => `[${formatLrcTime(l.time)}]${l.text}`).join('\n');
+  try {
+    await invoke('embed_lyrics_to_file', { path: track.path, lyrics: lrcText, offset: lyricOffset.value });
+    // Also persist offset in DB
+    invoke('save_lyric_offset', { path: track.path, offset: lyricOffset.value }).catch(() => {});
+    showToast('歌词已保存（.lrc + 元数据嵌入）✅', 'success');
+    lyricsSource.value = 'embedded';
+  } catch (e) {
+    console.error('[embed] failed:', e);
+    showToast('歌词保存失败', 'error');
+  }
 }
 
 function updateLyricIndex() {
   if (lyrics.value.length === 0) return;
-  const t = audio.currentTime;
+  const t = audio.currentTime - lyricOffset.value;
   for (let i = lyrics.value.length - 1; i >= 0; i--) {
     if (lyrics.value[i].time <= t) {
       currentLyricIdx.value = i;
@@ -286,30 +383,47 @@ async function loadAudioInfo(track: Track) {
 async function loadCoverArt(track: Track) {
   coverArtUrl.value = null;
   coverLoaded.value = false;
-  if (!track.path || !isTauri()) return;
 
-  try {
-    const result = await invoke<string | null>('extract_cover_art', { path: track.path });
-    if (result) {
-      const url = convertFileSrc(result);
-      // Verify the image actually loads
-      const img = new Image();
-      img.onload = () => {
-        coverArtUrl.value = url;
-        coverLoaded.value = true;
-      };
-      img.onerror = () => {
-        coverArtUrl.value = null;
-        coverLoaded.value = true;
-      };
-      img.src = url;
-    } else {
+  // Helper to load and verify an image URL
+  const tryImageUrl = (url: string) => {
+    const img = new Image();
+    img.onload = () => {
+      coverArtUrl.value = url;
       coverLoaded.value = true;
-    }
-  } catch (e) {
-    console.warn('[cover] extraction failed:', e);
-    coverLoaded.value = true;
+    };
+    img.onerror = () => {
+      // Don't set coverLoaded yet — may still have other sources
+    };
+    img.src = url;
+  };
+
+  // Step 1: Try embedded cover art from audio file
+  if (track.path && isTauri()) {
+    try {
+      const result = await invoke<string | null>('extract_cover_art', { path: track.path });
+      if (result) {
+        tryImageUrl(convertFileSrc(result));
+        // Wait a bit for image to load
+        await new Promise(r => setTimeout(r, 500));
+        if (coverArtUrl.value) return;
+      }
+    } catch { /* ignore */ }
   }
+
+  // Step 2: Try LrcAPI online cover search
+  if (!coverArtUrl.value) {
+    try {
+      const { artist, title } = parseArtistTitle(track.name);
+      const coverUrl = await searchOnlineCover(artist, title);
+      if (coverUrl) {
+        tryImageUrl(coverUrl);
+        await new Promise(r => setTimeout(r, 800));
+        if (coverArtUrl.value) return;
+      }
+    } catch { /* ignore */ }
+  }
+
+  coverLoaded.value = true;
 }
 
 function toggleSleepTimer() {
@@ -427,19 +541,30 @@ async function addPaths(paths: string[]) {
 function loadCurrent() {
   const item = playlist.value[currentIndex.value];
   if (!item) return;
-  // 先彻底停止旧音源，防止多首歌同时播放
+  
+  // 递增代际，使得之前排队的 play() 失效
+  audioLoadGen++;
+  const myGen = audioLoadGen;
+  
+  // 彻底停止并重置音频元素
   audio.pause();
-  audio.removeAttribute('src');
+  isPlaying.value = false;
+  audio.currentTime = 0;
+  audio.src = '';
   audio.load();
-  // 再加载新音源
+
+  // 设置新音源
   audio.src = item.url;
   audio.playbackRate = playbackRate.value;
-  audio.load();
+  
+  // 并发加载各项资源
   loadLyrics(item);
   loadWaveform(item);
   loadAudioInfo(item);
   loadCoverArt(item);
   setupMediaSession(item);
+
+  return myGen;
 }
 
 // Media Session API — 每首歌生成独有专辑封面
@@ -502,12 +627,15 @@ async function setupMediaSession(track: Track) {
   }
 }
 
-async function play() {
+async function play(gen?: number) {
   if (playlist.value.length === 0) return;
+  // 代际检查：如果不是最新一代，放弃播放
+  if (gen !== undefined && gen !== audioLoadGen) return;
   ensureAudioContext();
   if (!audio.src && currentIndex.value === -1) {
     currentIndex.value = 0;
     loadCurrent();
+    return;
   }
   if (!audio.src) return;
   try {
@@ -524,7 +652,7 @@ function pause() {
 
 function togglePlay() {
   if (isPlaying.value) { pause(); }
-  else if (playlist.value.length > 0) { play(); }
+  else if (playlist.value.length > 0) { play(audioLoadGen); }
 }
 
 function next() {
@@ -535,28 +663,28 @@ function next() {
       idx = Math.floor(Math.random() * playlist.value.length);
     }
     currentIndex.value = idx;
-    loadCurrent();
-    play();
+    const gen = loadCurrent();
+    play(gen);
     return;
   }
 
   if (repeatMode.value === 'one') {
-    loadCurrent();
-    play();
+    const gen = loadCurrent();
+    play(gen);
     return;
   }
 
   if (currentIndex.value + 1 < playlist.value.length) {
     currentIndex.value += 1;
-    loadCurrent();
-    play();
+    const gen = loadCurrent();
+    play(gen);
     return;
   }
 
   if (repeatMode.value === 'all') {
     currentIndex.value = 0;
-    loadCurrent();
-    play();
+    const gen = loadCurrent();
+    play(gen);
   }
 }
 
@@ -568,15 +696,15 @@ function prev() {
       idx = Math.floor(Math.random() * playlist.value.length);
     }
     currentIndex.value = idx;
-    loadCurrent();
-    play();
+    const gen = loadCurrent();
+    play(gen);
     return;
   }
 
   if (currentIndex.value - 1 >= 0) currentIndex.value -= 1;
   else currentIndex.value = playlist.value.length - 1;
-  loadCurrent();
-  play();
+  const gen = loadCurrent();
+  play(gen);
 }
 
 function seekTo(v: number) {
@@ -606,13 +734,13 @@ function onSeekPointerUp(e: PointerEvent) {
 function selectTrack(i: number) {
   if (i < 0 || i >= playlist.value.length) return;
   if (i === currentIndex.value) {
-    if (!isPlaying.value) play();
+    if (!isPlaying.value) play(audioLoadGen);
     return;
   }
   currentIndex.value = i;
   recordPlay(playlist.value[i]);
-  loadCurrent();
-  play();
+  const gen = loadCurrent();
+  play(gen);
 }
 
 // 从收藏列表播放：先在主列表找，找不到则临时加入
@@ -1010,6 +1138,17 @@ watch([
   if (!isRestoring.value) saveState();
 }, { deep: true });
 
+// Auto-save lyric offset to DB whenever it changes (debounced)
+let offsetSaveTimer: ReturnType<typeof setTimeout> | null = null;
+watch(lyricOffset, (newOffset) => {
+  if (isRestoring.value || !currentTrack.value?.path) return;
+  if (offsetSaveTimer) clearTimeout(offsetSaveTimer);
+  offsetSaveTimer = setTimeout(() => {
+    invoke('save_lyric_offset', { path: currentTrack.value!.path, offset: newOffset })
+      .catch(() => {});
+  }, 500);
+});
+
 function formatTime(s: number) {
   if (!s || Number.isNaN(s)) return '0:00';
   const m = Math.floor(s / 60);
@@ -1119,9 +1258,39 @@ function formatTime(s: number) {
         </div>
 
         <!-- 歌词显示 -->
-        <div v-if="lyrics.length > 0 && !isMini" class="lyrics-section">
-          <p class="lyric-line active" v-if="currentLyricIdx >= 0">{{ lyrics[currentLyricIdx]?.text }}</p>
-          <p class="lyric-line next" v-if="currentLyricIdx + 1 < lyrics.length">{{ lyrics[currentLyricIdx + 1]?.text }}</p>
+        <div v-if="!isMini && (lyrics.length > 0 || lyricsLoading)" class="lyrics-section">
+          <div v-if="lyricsLoading" class="lyrics-loading">
+            <span class="lyrics-spinner"></span>
+            <span class="lyrics-searching">正在搜索歌词…</span>
+          </div>
+          <template v-else>
+            <div class="lyrics-source-row">
+              <div class="lyrics-source-tag">
+                <span v-if="lyricsSource === 'embedded'" class="source-badge embedded">📀 内嵌</span>
+                <span v-else-if="lyricsSource === 'cache'" class="source-badge cache">💾 缓存</span>
+                <span v-else-if="lyricsSource === 'online'" class="source-badge online">🌐 在线</span>
+              </div>
+              <div class="lyrics-actions">
+                <div class="offset-control" title="歌词时间偏移校准（秒）">
+                  <button class="offset-btn" @click="lyricOffset = Math.max(-10, lyricOffset - 0.5)">−0.5</button>
+                  <span class="offset-value" :class="{ active: lyricOffset !== 0 }">{{ lyricOffset > 0 ? '+' : '' }}{{ lyricOffset.toFixed(1) }}s</span>
+                  <button class="offset-btn" @click="lyricOffset = Math.min(10, lyricOffset + 0.5)">+0.5</button>
+                  <button v-if="lyricOffset !== 0" class="offset-btn reset" @click="lyricOffset = 0" title="重置">↺</button>
+                </div>
+                <button
+                  v-if="lyricsSource === 'online' || lyricsSource === 'cache'"
+                  class="embed-lyrics-btn"
+                  @click="embedLyricsToFile"
+                  title="将歌词写入音频文件"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 004.778 21h14.444a2 2 0 002.157-1.515L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  嵌入
+                </button>
+              </div>
+            </div>
+            <p class="lyric-line active" v-if="currentLyricIdx >= 0">{{ lyrics[currentLyricIdx]?.text }}</p>
+            <p class="lyric-line next" v-if="currentLyricIdx + 1 < lyrics.length">{{ lyrics[currentLyricIdx + 1]?.text }}</p>
+          </template>
         </div>
 
         <!-- 波形图 -->
@@ -2019,13 +2188,152 @@ function formatTime(s: number) {
   gap: 0.3rem;
 }
 
+.lyrics-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.lyrics-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: lyrics-spin 0.8s linear infinite;
+}
+
+@keyframes lyrics-spin {
+  to { transform: rotate(360deg); }
+}
+
+.lyrics-searching {
+  opacity: 0.7;
+}
+
+.lyrics-source-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.lyrics-source-tag {
+  display: flex;
+  align-items: center;
+}
+
+.source-badge {
+  font-size: 0.65rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.02em;
+}
+
+.source-badge.embedded {
+  background: rgba(139, 92, 246, 0.2);
+  color: #a78bfa;
+}
+
+.source-badge.cache {
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+}
+
+.source-badge.online {
+  background: rgba(34, 197, 94, 0.2);
+  color: #4ade80;
+}
+
+.lyrics-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.offset-control {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.offset-btn {
+  width: 28px;
+  height: 20px;
+  font-size: 0.6rem;
+  font-weight: 700;
+  border: 1px solid var(--border-medium);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  padding: 0;
+  line-height: 1;
+}
+
+.offset-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.offset-btn.reset {
+  width: 22px;
+  font-size: 0.75rem;
+  border-color: rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+}
+
+.offset-value {
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  min-width: 36px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.offset-value.active {
+  color: #f59e0b;
+}
+
+.embed-lyrics-btn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.1);
+  color: #a5b4fc;
+  cursor: pointer;
+  padding: 2px 6px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.embed-lyrics-btn:hover {
+  background: rgba(99, 102, 241, 0.2);
+  color: #c7d2fe;
+  border-color: rgba(99, 102, 241, 0.5);
+}
+
 .lyric-line {
   margin: 0;
   font-size: 0.92rem;
   line-height: 1.6;
   color: var(--text-muted);
   transition: all 0.3s ease;
-  max-width: 300px;
+  max-width: 340px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

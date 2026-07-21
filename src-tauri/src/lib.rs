@@ -112,8 +112,22 @@ fn init_db(conn: &Connection) -> Result<(), String> {
          CREATE TABLE IF NOT EXISTS state (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
+        );
+         CREATE TABLE IF NOT EXISTS lyrics_cache (
+            path_hash TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            lyrics TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'online',
+            created_at INTEGER NOT NULL DEFAULT (unixepoch())
         );"
-    ).map_err(|e| e.to_string())
+    ).map_err(|e| e.to_string())?;
+
+    // Migration: add offset column if not exists
+    let _ = conn.execute_batch(
+        "ALTER TABLE lyrics_cache ADD COLUMN offset REAL NOT NULL DEFAULT 0.0;"
+    );
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -140,6 +154,256 @@ fn load_favorites(state: tauri::State<DbState>) -> Result<String, String> {
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(String::new()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Save online lyrics + offset to cache database.
+#[tauri::command]
+fn save_lyrics_cache(state: tauri::State<DbState>, path: String, lyrics: String, source: String, offset: f64) -> Result<bool, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let path_hash = format!("{:016x}", hasher.finish());
+
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO lyrics_cache (path_hash, path, lyrics, source, offset, created_at) VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())",
+        rusqlite::params![path_hash, path, lyrics, source, offset],
+    ).map_err(|e| e.to_string())?;
+    eprintln!("[lyrics] cached to db: {} ({} bytes, offset={})", path_hash, lyrics.len(), offset);
+    Ok(true)
+}
+
+/// Load lyrics + offset from cache database. Returns JSON `{ lyrics, offset }` or null.
+#[tauri::command]
+fn load_lyrics_cache(state: tauri::State<DbState>, path: String) -> Result<Option<String>, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let path_hash = format!("{:016x}", hasher.finish());
+
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let result: Result<(String, f64), _> = conn.query_row(
+        "SELECT lyrics, offset FROM lyrics_cache WHERE path_hash = ?1",
+        rusqlite::params![path_hash],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    );
+    match result {
+        Ok((lyrics, offset)) => {
+            eprintln!("[lyrics] cache hit: {} offset={}", path_hash, offset);
+            Ok(Some(serde_json::json!({ "lyrics": lyrics, "offset": offset }).to_string()))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Save just the lyric offset for a track (even without cached lyrics).
+#[tauri::command]
+fn save_lyric_offset(state: tauri::State<DbState>, path: String, offset: f64) -> Result<bool, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let path_hash = format!("{:016x}", hasher.finish());
+
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO lyrics_cache (path_hash, path, lyrics, source, offset, created_at) VALUES (?1, ?2, '', 'offset_only', ?3, unixepoch()) ON CONFLICT(path_hash) DO UPDATE SET offset = ?3",
+        rusqlite::params![path_hash, path, offset],
+    ).map_err(|e| e.to_string())?;
+    eprintln!("[lyrics] offset saved: {} offset={}", path_hash, offset);
+    Ok(true)
+}
+
+/// Load just the lyric offset for a track.
+#[tauri::command]
+fn load_lyric_offset(state: tauri::State<DbState>, path: String) -> Result<Option<f64>, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let path_hash = format!("{:016x}", hasher.finish());
+
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    let result: Result<f64, _> = conn.query_row(
+        "SELECT offset FROM lyrics_cache WHERE path_hash = ?1",
+        rusqlite::params![path_hash],
+        |row| row.get(0),
+    );
+    match result {
+        Ok(offset) => {
+            eprintln!("[lyrics] offset loaded: {} offset={}", path_hash, offset);
+            Ok(Some(offset))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+// ========== LrcAPI HTTP 代理（绕过 CORS）==========
+
+/// Proxy: search lyrics via LrcAPI.
+#[tauri::command]
+async fn lrcapi_search_lyrics(artist: String, title: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let url = format!(
+            "https://api.lrc.cx/lyrics?title={}&artist={}",
+            urlencoding(&title), urlencoding(&artist)
+        );
+        eprintln!("[lrcapi] GET {}", url);
+
+        let resp = ureq::get(&url)
+            .call()
+            .map_err(|e| format!("request: {}", e))?;
+
+        let text = resp.into_string()
+            .map_err(|e| format!("read: {}", e))?;
+
+        let trimmed = text.trim();
+        if !trimmed.is_empty() && trimmed.contains('[') {
+            eprintln!("[lrcapi] lyrics ✓ {} bytes", trimmed.len());
+            Ok(Some(trimmed.to_string()))
+        } else {
+            eprintln!("[lrcapi] lyrics: empty or invalid response");
+            Ok(None)
+        }
+    })
+    .await
+    .map_err(|e| format!("thread: {}", e))?
+}
+
+/// Proxy: search cover via LrcAPI.
+#[tauri::command]
+async fn lrcapi_search_cover(artist: String, title: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let url = format!(
+            "https://api.lrc.cx/cover?title={}&artist={}",
+            urlencoding(&title), urlencoding(&artist)
+        );
+        eprintln!("[lrcapi] cover GET {}", url);
+
+        // ureq by default follows redirects
+        let resp = ureq::get(&url)
+            .call()
+            .map_err(|e| format!("request: {}", e))?;
+
+        let final_url = resp.get_url().to_string();
+        eprintln!("[lrcapi] cover resolved: {}", final_url);
+
+        // If redirected to an image URL, return it
+        if final_url != url && !final_url.is_empty() {
+            eprintln!("[lrcapi] cover ✓ {}", final_url);
+            return Ok(Some(final_url));
+        }
+
+        // Try to parse JSON response
+        if let Ok(json) = resp.into_json::<serde_json::Value>() {
+            if let Some(img) = json.get("img").and_then(|v| v.as_str()) {
+                if !img.is_empty() {
+                    eprintln!("[lrcapi] cover ✓ {}", img);
+                    return Ok(Some(img.to_string()));
+                }
+            }
+        }
+
+        Ok(None)
+    })
+    .await
+    .map_err(|e| format!("thread: {}", e))?
+}
+
+/// Simple URL-encode (minimal, avoid extra dep)
+fn urlencoding(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() * 3);
+    for byte in s.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                result.push(byte as char);
+            }
+            _ => {
+                result.push_str(&format!("%{:02X}", byte));
+            }
+        }
+    }
+    result
+}
+
+/// Embed lyrics + offset into .lrc file and audio metadata.
+#[tauri::command]
+async fn embed_lyrics_to_file(path: String, lyrics: String, offset: f64) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || do_embed_lyrics(&path, &lyrics, offset))
+        .await
+        .map_err(|e| format!("embed lyrics thread panic: {}", e))?
+}
+
+fn do_embed_lyrics(path: &str, lyrics: &str, offset: f64) -> Result<String, String> {
+    use std::process::Command;
+    use std::io::Write;
+
+    auto_download().map_err(|e| format!("ffmpeg download: {}", e))?;
+
+    let ffmpeg_path = ffmpeg_sidecar::paths::ffmpeg_path();
+    let src_path = std::path::Path::new(path);
+    let ext = src_path.extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("mp3");
+
+    // ── 方案 A: 保存 .lrc 文件（含 offset 标记行）──
+    let lrc_text = if offset != 0.0 {
+        format!("[hanono:offset:{}]\n{}", offset, lyrics)
+    } else {
+        lyrics.to_string()
+    };
+    let lrc_path = src_path.with_extension("lrc");
+    std::fs::write(&lrc_path, &lrc_text)
+        .map_err(|e| format!("write lrc file: {}", e))?;
+    eprintln!("[lyrics] saved .lrc (offset={}): {}", offset, lrc_path.display());
+
+    // ── 方案 B: 尝试 ffmetadata 嵌入元数据 ──
+    let meta_path = src_path.with_extension("ffmeta.txt");
+    {
+        let mut f = std::fs::File::create(&meta_path)
+            .map_err(|e| format!("create meta file: {}", e))?;
+        writeln!(f, ";FFMETADATA1").map_err(|e| format!("write meta: {}", e))?;
+
+        let escaped = lyrics.replace('\\', "\\\\");
+        for line in escaped.lines() {
+            writeln!(f, "lyrics={}", line).map_err(|e| format!("write meta: {}", e))?;
+        }
+    }
+
+    let tmp_path = src_path.with_extension(format!("embed_tmp.{}", ext));
+    let out_path_str = tmp_path.to_string_lossy().to_string();
+
+    let output = Command::new(&ffmpeg_path)
+        .arg("-i").arg(path)
+        .arg("-i").arg(meta_path.to_string_lossy().to_string())
+        .args(["-map", "0:a"])          // 只映射音频流
+        .args(["-map_metadata", "1"])   // 从元数据文件映射标签
+        .args(["-c", "copy"])           // 不重新编码
+        .args(["-y"])
+        .arg(&out_path_str)
+        .output()
+        .map_err(|e| format!("ffmpeg spawn: {}", e))?;
+
+    // 清理临时文件
+    let _ = std::fs::remove_file(&meta_path);
+
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&tmp_path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // .lrc 文件已成功保存，元数据嵌入失败不是致命错误
+        eprintln!("[lyrics] ffmpeg metadata embed failed (but .lrc saved): {}", stderr);
+        return Ok(lrc_path.to_string_lossy().to_string());
+    }
+
+    // 替换原文件
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        eprintln!("[lyrics] replace failed (but .lrc saved): {}", e);
+        return Ok(lrc_path.to_string_lossy().to_string());
+    }
+
+    eprintln!("[lyrics] embedded + .lrc saved: {}", path);
+    Ok(path.to_string())
 }
 
 #[tauri::command]
@@ -634,6 +898,158 @@ fn do_get_audio_info(path: &str) -> Result<serde_json::Value, String> {
     }))
 }
 
+// ========== 内嵌歌词提取 ==========
+
+/// Extract embedded lyrics from audio file metadata.
+/// Tries symphonia metadata tags first, then ffprobe for MP3 USLT frames.
+#[tauri::command]
+async fn extract_embedded_lyrics(path: String) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || do_extract_embedded_lyrics(&path))
+        .await
+        .map_err(|e| format!("lyrics thread panic: {}", e))?
+}
+
+fn do_extract_embedded_lyrics(path: &str) -> Result<Option<String>, String> {
+    // Approach 1: Try symphonia metadata tags (works for FLAC/Vorbis/MP4)
+    if let Ok(Some(lyrics)) = try_symphonia_lyrics(path) {
+        if !lyrics.trim().is_empty() {
+            eprintln!("[lyrics] found via symphonia ({} bytes)", lyrics.len());
+            return Ok(Some(lyrics));
+        }
+    }
+
+    // Approach 2: Try ffprobe for ID3 USLT / other embedded lyrics
+    if let Ok(Some(lyrics)) = try_ffprobe_lyrics(path) {
+        if !lyrics.trim().is_empty() {
+            eprintln!("[lyrics] found via ffprobe ({} bytes)", lyrics.len());
+            return Ok(Some(lyrics));
+        }
+    }
+
+    eprintln!("[lyrics] no embedded lyrics found for: {}", path);
+    Ok(None)
+}
+
+fn try_symphonia_lyrics(path: &str) -> Result<Option<String>, String> {
+    let src = std::fs::File::open(path).map_err(|e| format!("open file: {}", e))?;
+    let mss = MediaSourceStream::new(Box::new(src), Default::default());
+
+    let mut hint = Hint::new();
+    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+        hint.with_extension(ext);
+    }
+
+    let mut probed = symphonia::default::get_probe()
+        .format(&hint, mss, &FormatOptions::default(), &MetadataOptions::default())
+        .map_err(|e| format!("probe: {}", e))?;
+
+    let metadata = probed.format.metadata();
+    let current = metadata.current();
+
+    // Check current metadata revision for lyrics tags
+    if let Some(rev) = current {
+        for tag in rev.tags() {
+            let key = tag.key.to_lowercase();
+            let value = tag.value.to_string();
+            if key == "lyrics" || key == "unsyncedlyrics" || key == "uslt" || key == "unsynced lyrics" {
+                return Ok(Some(value));
+            }
+        }
+        // Also check all tags as raw dump
+        let all_tags: Vec<String> = rev.tags().iter()
+            .map(|t| format!("{}={}", t.key, t.value))
+            .collect();
+        eprintln!("[lyrics] symphonia tags: {:?}", all_tags);
+    }
+
+    Ok(None)
+}
+
+fn try_ffprobe_lyrics(path: &str) -> Result<Option<String>, String> {
+    use std::process::Command;
+    use std::io::Read;
+
+    auto_download().map_err(|e| format!("ffmpeg download: {}", e))?;
+
+    // Compute ffprobe path from ffmpeg path (same directory)
+    let ffmpeg_path = ffmpeg_sidecar::paths::ffmpeg_path();
+    let ffprobe_path = ffmpeg_path.parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("ffprobe");
+
+    let mut child = Command::new(&ffprobe_path)
+        .args([
+            "-v", "error",
+            "-show_entries", "format_tags",
+            "-of", "json",
+            path,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("ffprobe spawn: {}", e))?;
+
+    let mut stdout = String::new();
+    child.stdout.take()
+        .ok_or_else(|| "no stdout".to_string())?
+        .read_to_string(&mut stdout)
+        .map_err(|e| format!("read ffprobe: {}", e))?;
+
+    let _ = child.wait();
+
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
+        if let Some(tags) = json["format"]["tags"].as_object() {
+            // Common tag names for embedded lyrics
+            let lyric_keys = ["lyrics", "LYRICS", "LYRICS-XXX", "USLT", "UNSYNCEDLYRICS",
+                              "unsynced lyrics", "UNSYNCED LYRICS", "TXXX:LYRICS"];
+            for key in &lyric_keys {
+                if let Some(val) = tags.get(*key).and_then(|v| v.as_str()) {
+                    if !val.trim().is_empty() {
+                        return Ok(Some(val.to_string()));
+                    }
+                }
+            }
+            // Dump all tags for debugging
+            eprintln!("[lyrics] ffprobe tags: {:?}", tags);
+        }
+    }
+
+    // Second try: use ffmpeg to dump metadata in ffmetadata format
+    let mut child2 = Command::new(&ffmpeg_path)
+        .args([
+            "-i", path,
+            "-f", "ffmetadata",
+            "pipe:1",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("ffmpeg spawn: {}", e))?;
+
+    let mut metadata_text = String::new();
+    child2.stdout.take()
+        .ok_or_else(|| "no stdout".to_string())?
+        .read_to_string(&mut metadata_text)
+        .map_err(|e| format!("read ffmpeg: {}", e))?;
+
+    let _ = child2.wait();
+
+    // Parse ffmetadata format: KEY=VALUE lines
+    for line in metadata_text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            let key_lower = key.trim().to_lowercase();
+            if key_lower == "lyrics" || key_lower.contains("lyrics") || key_lower == "unsyncedlyrics" {
+                let val = value.trim();
+                if !val.is_empty() {
+                    return Ok(Some(val.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(None)
+}
+
 // ========== 格式转换 (ffmpeg-sidecar) ==========
 
 use ffmpeg_sidecar::command::FfmpegCommand;
@@ -1078,7 +1494,7 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, generate_waveform_fast, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art])
+        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, save_lyrics_cache, load_lyrics_cache, save_lyric_offset, load_lyric_offset, lrcapi_search_lyrics, lrcapi_search_cover, embed_lyrics_to_file, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, generate_waveform_fast, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art, extract_embedded_lyrics])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {});
