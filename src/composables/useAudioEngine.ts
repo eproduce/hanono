@@ -214,6 +214,21 @@ export function useAudioEngine(audio: HTMLAudioElement) {
     showFxPanel.value = true;
   }
 
+  /** 临时静音输出（音源切换用） */
+  function muteForSwitch() {
+    if (!audioCtx) initAudioContext();
+    if (audioCtx && masterGain) {
+      masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
+    }
+  }
+
+  /** 恢复输出音量 */
+  function unmuteAfterSwitch(v: number) {
+    if (audioCtx && masterGain) {
+      masterGain.gain.setTargetAtTime(v, audioCtx.currentTime, 0.05);
+    }
+  }
+
   return {
     eqBands,
     bassBoost,
@@ -237,5 +252,7 @@ export function useAudioEngine(audio: HTMLAudioElement) {
     onReverbInput,
     onEqBandInput,
     openFxPanel,
+    muteForSwitch,
+    unmuteAfterSwitch,
   };
 }

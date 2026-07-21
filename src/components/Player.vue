@@ -31,6 +31,7 @@ const {
   ensureAudioContext, applyPreset,
   onBassBoostInput, onSurroundInput, onReverbInput, onEqBandInput,
   resetAllEffects, setMasterVolume, openFxPanel,
+  muteForSwitch, unmuteAfterSwitch,
 } = useAudioEngine(audio);
 const playlist = ref<Track[]>([]);
 const favorites = ref<Track[]>([]);
@@ -184,7 +185,7 @@ interface AudioInfo {
 }
 const audioInfo = ref<AudioInfo | null>(null);
 
-async function loadLyrics(track: Track) {
+async function loadLyrics(track: Track, forceRefresh = false) {
   lyrics.value = [];
   currentLyricIdx.value = -1;
   lyricsSource.value = 'none';
@@ -243,23 +244,28 @@ async function loadLyrics(track: Track) {
     }
   } catch { /* 无内嵌歌词 */ }
 
-  // Step 3: Check SQLite cache (returns JSON { lyrics, offset })
-  try {
-    const cached = await invoke<string | null>('load_lyrics_cache', { path: track.path });
-    if (cached) {
-      const data = JSON.parse(cached) as { lyrics: string; offset: number };
-      if (data.lyrics && data.lyrics.trim()) {
-        const { lines, offset } = parseLrcWithOffset(data.lyrics);
-        if (lines.length > 0) {
-          lyrics.value = lines;
-          lyricsSource.value = 'cache';
-          lyricOffset.value = data.offset !== 0 ? data.offset : offset;
-          lyricsLoading.value = false;
-          return;
+  // Step 3: Check SQLite cache (skip if force-refreshing)
+  if (!forceRefresh) {
+    try {
+      const cached = await invoke<string | null>('load_lyrics_cache', { path: track.path });
+      if (cached) {
+        const data = JSON.parse(cached) as { lyrics: string; offset: number };
+        if (data.lyrics && data.lyrics.trim()) {
+          const { lines, offset } = parseLrcWithOffset(data.lyrics);
+          if (lines.length > 0) {
+            lyrics.value = lines;
+            lyricsSource.value = 'cache';
+            lyricOffset.value = data.offset !== 0 ? data.offset : offset;
+            lyricsLoading.value = false;
+            return;
+          }
         }
       }
-    }
-  } catch { /* 缓存读取失败 */ }
+    } catch { /* 缓存读取失败 */ }
+  } else {
+    // 强制刷新：先删除旧缓存
+    invoke('delete_lyrics_cache', { path: track.path }).catch(() => {});
+  }
 
   // Step 4: Search online
   try {
@@ -276,6 +282,19 @@ async function loadLyrics(track: Track) {
   } catch { /* 在线搜索失败 */ }
 
   lyricsLoading.value = false;
+}
+
+/** Force re-fetch lyrics online (skip cache) */
+async function refreshLyrics() {
+  const track = currentTrack.value;
+  if (!track?.path) return;
+  lyricsLoading.value = true;
+  await loadLyrics(track, true);
+  if (lyricsSource.value === 'online') {
+    showToast('歌词已在线更新 🌐', 'success');
+  } else if (lyricsSource.value === 'none') {
+    showToast('未找到歌词', 'info');
+  }
 }
 
 /** Format seconds to [mm:ss.xx] LRC timestamp */
@@ -546,16 +565,21 @@ function loadCurrent() {
   audioLoadGen++;
   const myGen = audioLoadGen;
   
-  // 彻底停止并重置音频元素
+  // 静音防止变音/爆音
+  muteForSwitch();
   audio.pause();
   isPlaying.value = false;
   audio.currentTime = 0;
+  
+  // 彻底重置音源
   audio.src = '';
   audio.load();
-
-  // 设置新音源
   audio.src = item.url;
   audio.playbackRate = playbackRate.value;
+
+  // 延迟取消静音，确保新音源接管后恢复
+  const loudGain = (audioInfo.value as any)?._loudnessGain ?? 1.0;
+  setTimeout(() => unmuteAfterSwitch(volume.value * loudGain), 80);
   
   // 并发加载各项资源
   loadLyrics(item);
@@ -1285,6 +1309,15 @@ function formatTime(s: number) {
                 >
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M12 15V3m0 12l-4-4m4 4l4-4M2 17l.621 2.485A2 2 0 004.778 21h14.444a2 2 0 002.157-1.515L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   嵌入
+                </button>
+                <button
+                  v-if="lyricsSource === 'cache' || lyricsSource === 'online'"
+                  class="refresh-lyrics-btn"
+                  @click="refreshLyrics"
+                  title="重新在线搜索歌词"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M23 4v6h-6M1 20v-6h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                  刷新
                 </button>
               </div>
             </div>
@@ -2325,6 +2358,28 @@ function formatTime(s: number) {
   background: rgba(99, 102, 241, 0.2);
   color: #c7d2fe;
   border-color: rgba(99, 102, 241, 0.5);
+}
+
+.refresh-lyrics-btn {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 0.6rem;
+  font-weight: 600;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  border-radius: 4px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  cursor: pointer;
+  padding: 2px 6px;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+
+.refresh-lyrics-btn:hover {
+  background: rgba(245, 158, 11, 0.2);
+  color: #fcd34d;
+  border-color: rgba(245, 158, 11, 0.5);
 }
 
 .lyric-line {

@@ -326,6 +326,23 @@ fn urlencoding(s: &str) -> String {
     result
 }
 
+/// Delete cached lyrics for a track (force re-fetch online).
+#[tauri::command]
+fn delete_lyrics_cache(state: tauri::State<DbState>, path: String) -> Result<bool, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    let path_hash = format!("{:016x}", hasher.finish());
+
+    let conn = state.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM lyrics_cache WHERE path_hash = ?1",
+        rusqlite::params![path_hash],
+    ).map_err(|e| e.to_string())?;
+    eprintln!("[lyrics] cache deleted: {}", path_hash);
+    Ok(true)
+}
+
 /// Embed lyrics + offset into .lrc file and audio metadata.
 #[tauri::command]
 async fn embed_lyrics_to_file(path: String, lyrics: String, offset: f64) -> Result<String, String> {
@@ -1494,7 +1511,7 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, save_lyrics_cache, load_lyrics_cache, save_lyric_offset, load_lyric_offset, lrcapi_search_lyrics, lrcapi_search_cover, embed_lyrics_to_file, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, generate_waveform_fast, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art, extract_embedded_lyrics])
+        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, save_lyrics_cache, load_lyrics_cache, delete_lyrics_cache, save_lyric_offset, load_lyric_offset, lrcapi_search_lyrics, lrcapi_search_cover, embed_lyrics_to_file, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, generate_waveform_fast, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art, extract_embedded_lyrics])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {});
