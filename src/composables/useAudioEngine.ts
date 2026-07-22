@@ -214,10 +214,13 @@ export function useAudioEngine(audio: HTMLAudioElement) {
     showFxPanel.value = true;
   }
 
-  /** 临时静音输出（音源切换用） */
+  /** 临时静音输出（音源切换用），调用前需确保 ctx 已唤醒 */
   function muteForSwitch() {
     if (!audioCtx) initAudioContext();
     if (audioCtx && masterGain) {
+      // 强制 resume 确保 currentTime 在推进
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      masterGain.gain.cancelScheduledValues(audioCtx.currentTime);
       masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
     }
   }

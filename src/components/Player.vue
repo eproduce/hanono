@@ -561,27 +561,38 @@ function loadCurrent() {
   const item = playlist.value[currentIndex.value];
   if (!item) return;
   
-  // 递增代际，使得之前排队的 play() 失效
+  // 递增代际
   audioLoadGen++;
   const myGen = audioLoadGen;
   
-  // 静音防止变音/爆音
+  // 先唤醒 AudioContext（否则 currentTime 不推进，静音无效）
+  ensureAudioContext();
   muteForSwitch();
   audio.pause();
   isPlaying.value = false;
   audio.currentTime = 0;
+  audio.volume = 0;
   
-  // 彻底重置音源
+  // 切换音源
   audio.src = '';
-  audio.load();
   audio.src = item.url;
   audio.playbackRate = playbackRate.value;
 
-  // 延迟取消静音，确保新音源接管后恢复
+  // 事件驱动恢复音量，而非猜测延迟
   const loudGain = (audioInfo.value as any)?._loudnessGain ?? 1.0;
-  setTimeout(() => unmuteAfterSwitch(volume.value * loudGain), 80);
+  const restoreVol = volume.value * loudGain;
+  const onReady = () => {
+    if (audioLoadGen !== myGen) return;
+    audio.removeEventListener('canplay', onReady);
+    audio.removeEventListener('loadedmetadata', onReady);
+    audio.volume = volume.value;
+    unmuteAfterSwitch(restoreVol);
+  };
+  audio.addEventListener('canplay', onReady);
+  audio.addEventListener('loadedmetadata', onReady);
+  setTimeout(() => onReady(), 2000); // 兜底
   
-  // 并发加载各项资源
+  // 并发加载资源
   loadLyrics(item);
   loadWaveform(item);
   loadAudioInfo(item);
@@ -1072,8 +1083,7 @@ onMounted(async () => {
   audio.addEventListener('play', () => (isPlaying.value = true));
   audio.addEventListener('pause', () => (isPlaying.value = false));
   audio.addEventListener('ended', () => {
-    if (currentIndex.value + 1 < playlist.value.length) next();
-    else isPlaying.value = false;
+    next();
   });
 
   const onKey = (ev: KeyboardEvent) => {
