@@ -115,43 +115,43 @@ jobs:
 
       - name: Package Windows portable (zip)
         if: runner.os == 'Windows'
-        shell: bash
+        shell: pwsh
         run: |
-          REL_DIR="src-tauri/target/${{ matrix.target }}/release"
-          [ -d "$REL_DIR" ] || REL_DIR="src-tauri/target/release"
-          echo "REL_DIR=$REL_DIR"
+          $REL_DIR = "src-tauri/target/${{ matrix.target }}/release"
+          if (-not (Test-Path $REL_DIR)) { $REL_DIR = "src-tauri/target/release" }
+          Write-Host "REL_DIR=$REL_DIR"
           
-          PORTABLE_DIR="hanono-portable"
-          rm -rf "$PORTABLE_DIR" && mkdir -p "$PORTABLE_DIR"
+          $PORTABLE_DIR = "hanono-portable"
+          if (Test-Path $PORTABLE_DIR) { Remove-Item -Recurse -Force $PORTABLE_DIR }
+          New-Item -ItemType Directory -Force -Path $PORTABLE_DIR | Out-Null
           
           # Copy the exe
-          if [ -f "$REL_DIR/hanono.exe" ]; then
-            cp "$REL_DIR/hanono.exe" "$PORTABLE_DIR/"
-            echo "Copied hanono.exe"
-          else
-            echo "⚠️ hanono.exe not found in $REL_DIR"
-            ls "$REL_DIR/"*.exe 2>/dev/null || true
-          fi
+          $exe = Join-Path $REL_DIR "hanono.exe"
+          if (Test-Path $exe) {
+            Copy-Item $exe $PORTABLE_DIR
+            Write-Host "Copied hanono.exe"
+          } else {
+            Write-Host "⚠️ hanono.exe not found in $REL_DIR"
+          }
           
           # Copy dlls
-          shopt -s nullglob
-          for dll in "$REL_DIR"/*.dll; do
-            cp "$dll" "$PORTABLE_DIR/"
-            echo "Copied $(basename "$dll")"
-          done
-          shopt -u nullglob
+          Get-ChildItem "$REL_DIR/*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName $PORTABLE_DIR
+            Write-Host "Copied $($_.Name)"
+          }
           
           # Create zip if we have files
-          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
-          [ -d "$BUNDLE_DIR" ] || BUNDLE_DIR="src-tauri/target/release/bundle"
-          mkdir -p "$BUNDLE_DIR"
+          $BUNDLE_DIR = "src-tauri/target/${{ matrix.target }}/release/bundle"
+          if (-not (Test-Path $BUNDLE_DIR)) { $BUNDLE_DIR = "src-tauri/target/release/bundle" }
+          New-Item -ItemType Directory -Force -Path $BUNDLE_DIR | Out-Null
           
-          if [ -n "$(ls -A "$PORTABLE_DIR" 2>/dev/null)" ]; then
-            zip -r "$BUNDLE_DIR/Hanono_${{ github.ref_name }}_x64_portable.zip" "$PORTABLE_DIR"
-            echo "✅ Created portable zip: $BUNDLE_DIR/Hanono_${{ github.ref_name }}_x64_portable.zip"
-          else
-            echo "⚠️ No files to package, skipping zip"
-          fi
+          $zipPath = Join-Path $BUNDLE_DIR "Hanono_${{ github.ref_name }}_x64_portable.zip"
+          if (Get-ChildItem $PORTABLE_DIR -ErrorAction SilentlyContinue) {
+            Compress-Archive -Path "$PORTABLE_DIR/*" -DestinationPath $zipPath -Force
+            Write-Host "✅ Created portable zip: $zipPath"
+          } else {
+            Write-Host "⚠️ No files to package, skipping zip"
+          }
 
       - name: Upload to GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
