@@ -5,6 +5,13 @@ All notable changes to Hanono will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1](https://github.com/eproduce/hanono/compare/v0.5.0...v0.5.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* 修复列表循环/单曲循环/随机播放在最后一首失效的bug ([1e0e734](https://github.com/eproduce/hanono/commit/1e0e73449393cf129ff80be5ecabf538300b270b))
+
 ## [0.4.4](https://github.com/eproduce/hanono/compare/v0.4.3...v0.4.4) (2026-07-21)
 
 
