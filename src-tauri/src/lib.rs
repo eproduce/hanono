@@ -270,6 +270,56 @@ async fn lrcapi_search_lyrics(artist: String, title: String) -> Result<Option<St
     .map_err(|e| format!("thread: {}", e))?
 }
 
+/// Proxy: 获取候选歌词列表（LrcAPI jsonapi，带 title/artist/lyrics 字段）。
+/// 前端据此按曲目信息做匹配校验，避免“搜出来一个完全不对的歌词”。
+#[tauri::command]
+async fn lrcapi_search_lyrics_candidates(
+    artist: String,
+    title: String,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    tokio::task::spawn_blocking(move || {
+        let limit = limit.unwrap_or(6).clamp(1, 20);
+        let url = format!(
+            "https://api.lrc.cx/jsonapi?title={}&artist={}&limit={}",
+            urlencoding(&title),
+            urlencoding(&artist),
+            limit
+        );
+        eprintln!("[lrcapi] candidates GET {}", url);
+
+        let resp = ureq::get(&url)
+            .call()
+            .map_err(|e| format!("request: {}", e))?;
+
+        let text = resp.into_string().map_err(|e| format!("read: {}", e))?;
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| format!("parse json: {}", e))?;
+
+        let list: Vec<serde_json::Value> = match parsed {
+            serde_json::Value::Array(items) => items,
+            other => vec![other],
+        };
+
+        let candidates: Vec<serde_json::Value> = list
+            .into_iter()
+            .filter(|item| {
+                item.get("lyrics")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().len() > 16 && s.contains('['))
+                    .unwrap_or(false)
+            })
+            .take(limit)
+            .collect();
+
+        eprintln!("[lrcapi] candidates ✓ {}", candidates.len());
+        Ok(candidates)
+    })
+    .await
+    .map_err(|e| format!("thread: {}", e))?
+}
+
 /// Proxy: search cover via LrcAPI.
 #[tauri::command]
 async fn lrcapi_search_cover(artist: String, title: String) -> Result<Option<String>, String> {
@@ -1511,7 +1561,7 @@ pub fn run() {
                 _ => {}
             }
         })
-        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, save_lyrics_cache, load_lyrics_cache, delete_lyrics_cache, save_lyric_offset, load_lyric_offset, lrcapi_search_lyrics, lrcapi_search_cover, embed_lyrics_to_file, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, generate_waveform_fast, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art, extract_embedded_lyrics])
+        .invoke_handler(tauri::generate_handler![save_playlist, load_playlist, save_favorites, load_favorites, save_lyrics_cache, load_lyrics_cache, delete_lyrics_cache, save_lyric_offset, load_lyric_offset, lrcapi_search_lyrics, lrcapi_search_lyrics_candidates, lrcapi_search_cover, embed_lyrics_to_file, copy_file_to_data, read_text_file, reveal_in_finder, generate_waveform, generate_waveform_fast, get_audio_info, convert_audio, analyze_loudness, trim_audio, extract_cover_art, extract_embedded_lyrics])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {});
