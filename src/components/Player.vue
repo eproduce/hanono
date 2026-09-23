@@ -4,7 +4,6 @@ import { invoke, isTauri, convertFileSrc } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { open } from '@tauri-apps/plugin-dialog';
 import { listen } from '@tauri-apps/api/event';
-import WaveformCanvas from './WaveformCanvas.vue';
 import FxPanel from './FxPanel.vue';
 import PlaylistSidebar from './PlaylistSidebar.vue';
 import AppModals from './AppModals.vue';
@@ -31,7 +30,7 @@ const {
   ensureAudioContext, applyPreset,
   onBassBoostInput, onSurroundInput, onReverbInput, onEqBandInput,
   resetAllEffects, setMasterVolume, openFxPanel,
-  muteForSwitch, unmuteAfterSwitch,
+  muteForSwitch, unmuteAfterSwitch, setSampleRateHint, markSampleRateUnknown,
 } = useAudioEngine(audio);
 const playlist = ref<Track[]>([]);
 const favorites = ref<Track[]>([]);
@@ -144,7 +143,20 @@ const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
 function cycleSpeed() {
   const idx = speeds.indexOf(playbackRate.value);
   playbackRate.value = speeds[(idx + 1) % speeds.length];
+  applyPitchPreservation();
   audio.playbackRate = playbackRate.value;
+}
+
+/** 变速不变调：显式开启音高保持（WebKit 旧版为 webkitPreservesPitch） */
+function applyPitchPreservation() {
+  const el = audio as HTMLAudioElement & Record<string, unknown>;
+  for (const key of ['preservesPitch', 'webkitPreservesPitch', 'mozPreservesPitch']) {
+    try {
+      el[key] = true;
+    } catch {
+      /* 不支持的实现直接忽略 */
+    }
+  }
 }
 
 // Mini 播放器模式
@@ -160,12 +172,6 @@ const currentLyricIdx = ref(-1);
 const lyricsLoading = ref(false);
 const lyricsSource = ref<'none' | 'embedded' | 'online' | 'cache'>('none');
 const lyricOffset = ref(0); // 秒，正数=歌词延后，负数=歌词提前
-
-// 波形数据
-const waveformPeaks = ref<number[]>([]);
-const waveformLoading = ref(false);
-let waveformAbortId = 0;
-let infoAbortId = 0;
 
 // 音频详情
 interface AudioInfo {
@@ -293,7 +299,7 @@ async function refreshLyrics() {
   if (lyricsSource.value === 'online') {
     showToast('歌词已在线更新 🌐', 'success');
   } else if (lyricsSource.value === 'none') {
-    showToast('未找到歌词', 'info');
+    showToast('未找到匹配的歌词（已过滤不相关结果）', 'info');
   }
 }
 
@@ -334,51 +340,27 @@ function updateLyricIndex() {
   currentLyricIdx.value = -1;
 }
 
-// 波形生成（优先 ffmpeg 快速路径 → 自动缓存 → 回退 symphonia）
-async function loadWaveform(track: Track) {
-  waveformPeaks.value = [];
-  if (!track.path || !isTauri()) return;
-
-  const currentAbortId = ++waveformAbortId;
-  waveformLoading.value = true;
-
-  try {
-    const result = await invoke<{ peaks: number[] }>('generate_waveform_fast', {
-      path: track.path,
-      numPeaks: 1500,
-    });
-    if (currentAbortId === waveformAbortId) {
-      waveformPeaks.value = result.peaks;
-    }
-  } catch (e) {
-    console.warn('[waveform] generation failed:', e);
-    if (currentAbortId === waveformAbortId) {
-      waveformPeaks.value = [];
-    }
-  } finally {
-    if (currentAbortId === waveformAbortId) {
-      waveformLoading.value = false;
-    }
-  }
-}
-
-function onWaveformSeek(time: number) {
-  audio.currentTime = time;
-}
-
 // 音频详情
+let infoAbortId = 0;
+
 async function loadAudioInfo(track: Track) {
   audioInfo.value = null;
   const currentAbortId = ++infoAbortId;
-  if (!track.path || !isTauri()) return;
+  if (!track.path || !isTauri()) {
+    markSampleRateUnknown();
+    return;
+  }
 
   try {
     const result = await invoke<AudioInfo>('get_audio_info', { path: track.path });
     if (currentAbortId !== infoAbortId) return;
     audioInfo.value = result;
+    // 把文件采样率告知音频引擎：Web Audio 管线按同一采样率建立，避免变调
+    setSampleRateHint(result.sampleRate);
   } catch (e) {
     if (currentAbortId !== infoAbortId) return;
     console.warn('[audio-info] failed:', e);
+    markSampleRateUnknown();
   }
 
   // Analyze loudness in background
@@ -576,6 +558,7 @@ function loadCurrent() {
   // 切换音源
   audio.src = '';
   audio.src = item.url;
+  applyPitchPreservation();
   audio.playbackRate = playbackRate.value;
 
   // 事件驱动恢复音量，而非猜测延迟
@@ -594,7 +577,6 @@ function loadCurrent() {
   
   // 并发加载资源
   loadLyrics(item);
-  loadWaveform(item);
   loadAudioInfo(item);
   loadCoverArt(item);
   setupMediaSession(item);
@@ -1075,6 +1057,7 @@ async function applyState(data: any) {
 
 onMounted(async () => {
   audio.volume = volume.value;
+  applyPitchPreservation();
   audio.addEventListener('timeupdate', () => {
     currentTime.value = audio.currentTime;
     duration.value = audio.duration || 0;
@@ -1274,6 +1257,15 @@ function formatTime(s: number) {
                 </svg>
               </button>
             </div>
+            <!-- 音频信息（紧贴歌名下方） -->
+            <div v-if="audioInfo && !isMini" class="audio-tags">
+              <span class="audio-tag codec">{{ audioInfo.codec }}</span>
+              <span class="audio-tag">{{ audioInfo.sampleRateStr }}</span>
+              <span class="audio-tag">{{ audioInfo.bitrateStr }}</span>
+              <span class="audio-tag">{{ audioInfo.channelsStr }}</span>
+              <span v-if="audioInfo.bitDepth > 0" class="audio-tag">{{ audioInfo.bitDepthStr }}</span>
+              <span class="audio-tag dim">{{ audioInfo.fileSizeStr }}</span>
+            </div>
             <p class="track-meta">
               <template v-if="currentTrack">
                 <span class="meta-badge">{{ currentIndex + 1 }} / {{ playlist.length }}</span>
@@ -1334,27 +1326,6 @@ function formatTime(s: number) {
             <p class="lyric-line active" v-if="currentLyricIdx >= 0">{{ lyrics[currentLyricIdx]?.text }}</p>
             <p class="lyric-line next" v-if="currentLyricIdx + 1 < lyrics.length">{{ lyrics[currentLyricIdx + 1]?.text }}</p>
           </template>
-        </div>
-
-        <!-- 波形图 -->
-        <div v-if="currentTrack && !isMini" class="waveform-section">
-          <WaveformCanvas
-            :peaks="waveformPeaks"
-            :currentTime="currentTime"
-            :duration="duration"
-            :loading="waveformLoading"
-            @seek="onWaveformSeek"
-          />
-        </div>
-
-        <!-- 音频信息标签行 -->
-        <div v-if="audioInfo && !isMini" class="audio-tags">
-          <span class="audio-tag codec">{{ audioInfo.codec }}</span>
-          <span class="audio-tag">{{ audioInfo.sampleRateStr }}</span>
-          <span class="audio-tag">{{ audioInfo.bitrateStr }}</span>
-          <span class="audio-tag">{{ audioInfo.channelsStr }}</span>
-          <span v-if="audioInfo.bitDepth > 0" class="audio-tag">{{ audioInfo.bitDepthStr }}</span>
-          <span class="audio-tag dim">{{ audioInfo.fileSizeStr }}</span>
         </div>
 
         <!-- 播放控制区 -->
@@ -2415,17 +2386,13 @@ function formatTime(s: number) {
   font-size: 0.82rem;
 }
 
-/* ========== 波形图 ========== */
-.waveform-section {
-  padding: 0.25rem 0;
-}
-
-/* ========== 音频信息标签行 ========== */
+/* ========== 音频信息标签行（位于歌名下方） ========== */
 .audio-tags {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 6px;
-  padding-bottom: 0.35rem;
+  max-width: 100%;
 }
 
 .audio-tag {

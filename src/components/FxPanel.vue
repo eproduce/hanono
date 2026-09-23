@@ -60,9 +60,11 @@ const presetDisplay: Record<EqPresetKey, string> = {
             <label class="fx-label">均衡器</label>
             <div class="eq-sliders">
               <div v-for="(band, i) in eqBands" :key="band.name" class="eq-band">
-                <input class="eq-slider" type="range" min="-12" max="12" step="0.5"
-                  :value="band.gain.value" @input="emit('onEqBandInput', i, $event)" />
                 <span class="eq-db">{{ (band.gain.value ?? 0) > 0 ? '+' : '' }}{{ (band.gain.value ?? 0).toFixed(1) }}dB</span>
+                <div class="eq-slider-wrap">
+                  <input class="eq-slider" type="range" min="-12" max="12" step="0.5"
+                    :value="band.gain.value" @input="emit('onEqBandInput', i, $event)" />
+                </div>
                 <span class="eq-freq">{{ band.name }}</span>
               </div>
             </div>
@@ -200,14 +202,21 @@ const presetDisplay: Record<EqPresetKey, string> = {
   color: #a78bfa; border-color: #6366f1; font-weight: 600;
 }
 
-.eq-sliders { display: flex; gap: 0.5rem; justify-content: center; }
-.eq-band { display: flex; flex-direction: column; align-items: center; gap: 0.3rem; flex: 1; max-width: 64px; }
+.eq-sliders { display: flex; gap: 0.6rem; justify-content: center; align-items: flex-end; padding: 0.35rem 0 0.1rem; }
+.eq-band { display: flex; flex-direction: column; align-items: center; gap: 0.35rem; flex: 1; max-width: 64px; }
+
+/* 垂直滑块：旋转 -90° 实现，兼容 WebKit / Chromium / WebKitGTK，
+   命中区域与拖拽方向均正确（向上 = 增大） */
+.eq-slider-wrap { position: relative; width: 22px; height: 132px; }
 
 .eq-slider {
   -webkit-appearance: none; appearance: none;
-  width: 100%; height: 6px; cursor: pointer;
+  position: absolute; top: 50%; left: 50%;
+  width: 132px;              /* 旋转后成为竖直方向的滑动长度 */
+  height: 6px;
+  transform: translate(-50%, -50%) rotate(-90deg);
   background: rgba(255, 255, 255, 0.08); border-radius: 999px;
-  outline: none; margin-bottom: 0.3rem;
+  outline: none; cursor: pointer; touch-action: none;
 }
 .eq-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -216,8 +225,13 @@ const presetDisplay: Record<EqPresetKey, string> = {
   border: 2px solid #fff; cursor: pointer;
   box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
+.eq-slider::-moz-range-thumb {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  border: 2px solid #fff; cursor: pointer;
+}
 
-.eq-db { font-size: 0.65rem; font-weight: 600; color: #a78bfa; font-variant-numeric: tabular-nums; }
+.eq-db { font-size: 0.65rem; font-weight: 600; color: #a78bfa; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .eq-freq { font-size: 0.68rem; color: #64748b; font-weight: 500; }
 
 .fx-reset-row { display: flex; justify-content: flex-end; margin-top: 0.75rem; }
