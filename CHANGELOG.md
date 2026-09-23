@@ -5,6 +5,14 @@ All notable changes to Hanono will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2](https://github.com/eproduce/hanono/compare/v0.5.1...v0.5.2) (2026-09-23)
+
+
+### Bug Fixes
+
+* **audio:** 修复播放变调，并调整界面布局 ([c03e0c3](https://github.com/eproduce/hanono/commit/c03e0c32b9dd0f5bd0779d7e346bf7f6c78a9860))
+* **lyrics:** 歌词匹配校验，避免搜到与曲目无关的歌词 ([c1c2fdd](https://github.com/eproduce/hanono/commit/c1c2fdd685b048a560f3477404135fed3cea71ba))
+
 ## [0.5.1](https://github.com/eproduce/hanono/compare/v0.5.0...v0.5.1) (2026-07-22)
 
 
